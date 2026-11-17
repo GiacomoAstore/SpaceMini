@@ -1,0 +1,551 @@
+// Trystero Hybrid Transport (WebRTC P2P + Multi-Broker MQTT/WSS Relay + Port-443 Nostr Fallback)
+// Consente di trovarsi e giocare anche tra smartphone su reti mobili 4G/5G diverse (dietro CGNAT / NAT simmetrico).
+(() => {
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  const ABC = '0123456789AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz';
+  const rnd = n => Array.from({ length: n }, () => ABC[(Math.random() * 62) | 0]).join('');
+  const selfId = rnd(20);
+  let pktSeq = 0, subId = 1;
+
+  const DEFAULT_MQTT = [
+    'wss://broker.hivemq.com:8884/mqtt',
+    'wss://mqtt-dashboard.com:8884/mqtt',
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker-cn.emqx.io:8084/mqtt'
+  ];
+  const NOSTR_443 = ['wss://relay.primal.net', 'wss://nos.lol'];
+  const STUN = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ];
+
+  // --- Codifica pacchetti MQTT v3.1.1 su WebSocket ---
+  const encLen = n => { const a = []; do { let b = n & 127; n >>>= 7; if (n) b |= 128; a.push(b); } while (n); return a; };
+  const mqttConn = id => {
+    const b = enc.encode(id), p = [0, 4, 77, 81, 84, 84, 4, 2, 0, 30, b.length >> 8, b.length & 255, ...b];
+    return new Uint8Array([0x10, ...encLen(p.length), ...p]);
+  };
+  const mqttSub = t => {
+    const b = enc.encode(t), id = (subId = (subId % 65535) + 1), p = [id >> 8, id & 255, b.length >> 8, b.length & 255, ...b, 0];
+    return new Uint8Array([0x82, ...encLen(p.length), ...p]);
+  };
+  const mqttUnsub = t => {
+    const b = enc.encode(t), id = (subId = (subId % 65535) + 1), p = [id >> 8, id & 255, b.length >> 8, b.length & 255, ...b];
+    return new Uint8Array([0xa2, ...encLen(p.length), ...p]);
+  };
+  const mqttPub = (t, s) => {
+    const tb = enc.encode(t), pb = enc.encode(s), rem = 2 + tb.length + pb.length;
+    const h = [0x30, ...encLen(rem), tb.length >> 8, tb.length & 255];
+    const o = new Uint8Array(h.length + tb.length + pb.length);
+    o.set(h, 0); o.set(tb, h.length); o.set(pb, h.length + tb.length);
+    return o;
+  };
+
+  // --- Pool globale di broker MQTT + fallback Nostr su porta 443 ---
+  const brokers = [];
+  const topicHandlers = new Map(); // topic -> Set of handler(msg, broker)
+  let nostrStarted = false, nostrSigner = null;
+  const nostrRelays = [];
+
+  const ensureBrokers = customUrls => {
+    if (brokers.length) return;
+    const urls = Array.isArray(customUrls) && customUrls.length
+      ? customUrls.filter(u => /^wss?:\/\//i.test(u)).concat(DEFAULT_MQTT)
+      : DEFAULT_MQTT;
+    [...new Set(urls)].forEach(url => {
+      if (!url.includes('mqtt')) return;
+      const br = { url, ws: null, ready: false, rx: new Uint8Array(0), pingT: null, reconT: null, send: null };
+      const connect = () => {
+        clearTimeout(br.reconT);
+        try {
+          const ws = new WebSocket(url, 'mqtt');
+          ws.binaryType = 'arraybuffer';
+          br.ws = ws; br.ready = false; br.rx = new Uint8Array(0);
+          br.send = (top, rawMqtt) => { if (br.ready && ws.readyState === 1) try { ws.send(rawMqtt); } catch (e) {} };
+          ws.onopen = () => { try { ws.send(mqttConn('sm_' + selfId.slice(0, 10) + '_' + rnd(4))); } catch (e) {} };
+          ws.onmessage = ev => {
+            const chunk = new Uint8Array(ev.data);
+            const buf = new Uint8Array(br.rx.length + chunk.length);
+            buf.set(br.rx, 0); buf.set(chunk, br.rx.length);
+            let i = 0;
+            while (i < buf.length) {
+              const type = buf[i] >> 4;
+              let mul = 1, len = 0, idx = i + 1, ok = false;
+              while (idx < buf.length) {
+                const b = buf[idx++];
+                len += (b & 127) * mul; mul *= 128;
+                if (!(b & 128)) { ok = true; break; }
+              }
+              if (!ok || idx + len > buf.length) break;
+              if (type === 2) {
+                br.ready = true;
+                topicHandlers.forEach((_, top) => { try { ws.send(mqttSub(top)); } catch (e) {} });
+              } else if (type === 9) {
+                topicHandlers.forEach(set => set.forEach(fn => fn.onSubAck && fn.onSubAck(br)));
+              } else if (type === 3) {
+                const tlen = (buf[idx] << 8) | buf[idx + 1];
+                const top = dec.decode(buf.subarray(idx + 2, idx + 2 + tlen));
+                const pay = dec.decode(buf.subarray(idx + 2 + tlen, idx + len));
+                const set = topicHandlers.get(top);
+                if (set) {
+                  try { const m = JSON.parse(pay); set.forEach(fn => fn(m, br)); } catch (e) {}
+                }
+              }
+              i = idx + len;
+            }
+            br.rx = buf.subarray(i);
+          };
+          ws.onclose = () => {
+            br.ready = false; clearInterval(br.pingT);
+            if (topicHandlers.size > 0) br.reconT = setTimeout(connect, 2000);
+          };
+          ws.onerror = () => {};
+          br.pingT = setInterval(() => { if (br.ready && ws.readyState === 1) try { ws.send(new Uint8Array([0xc0, 0])); } catch (e) {} }, 20000);
+        } catch (e) {}
+      };
+      connect();
+      brokers.push(br);
+    });
+
+    // Se dopo 1.8s nessun broker MQTT ha risposto (es. firewall che blocca porte 8084/8884), attiva Nostr su porta 443
+    setTimeout(() => {
+      if (!brokers.some(b => b.ready) && topicHandlers.size > 0) startNostrFallback();
+    }, 1800);
+  };
+
+  // --- Fallback Nostr su porta standard HTTPS 443 (BIP-340 Schnorr in BigInt nativo) ---
+  const initNostrSigner = async () => {
+    if (nostrSigner) return nostrSigner;
+    const P = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+    const N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+    const GX = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798n;
+    const GY = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8n;
+    const mod = (a, m = P) => ((a % m) + m) % m;
+    const pow = (b, e, m = P) => { let r = 1n; b = mod(b, m); while (e > 0n) { if (e & 1n) r = mod(r * b, m); b = mod(b * b, m); e >>= 1n; } return r; };
+    const inv = (a, m = P) => pow(a, m - 2n, m);
+    const add = (p1, p2) => {
+      if (!p1) return p2; if (!p2) return p1;
+      const [x1, y1] = p1, [x2, y2] = p2;
+      if (x1 === x2 && y1 !== y2) return null;
+      const s = x1 === x2 ? mod(3n * x1 * x1 * inv(2n * y1)) : mod((y2 - y1) * inv(x2 - x1));
+      const x3 = mod(s * s - x1 - x2);
+      return [x3, mod(s * (x1 - x3) - y1)];
+    };
+    const mul = (k, p = [GX, GY]) => { let r = null, q = p; while (k > 0n) { if (k & 1n) r = add(r, q); q = add(q, q); k >>= 1n; } return r; };
+    const hex = (n, l = 64) => n.toString(16).padStart(l, '0');
+    const sha = async (...parts) => {
+      let len = parts.reduce((a, b) => a + b.length, 0), u = new Uint8Array(len), o = 0;
+      for (const p of parts) { u.set(p, o); o += p.length; }
+      return new Uint8Array(await crypto.subtle.digest('SHA-256', u));
+    };
+    const b2n = b => BigInt('0x' + Array.from(b, x => x.toString(16).padStart(2, '0')).join(''));
+    const n2b = n => new Uint8Array(hex(n).match(/../g).map(h => parseInt(h, 16)));
+    const tagH = async (tag, ...msgs) => { const th = await sha(enc.encode(tag)); return sha(th, th, ...msgs); };
+    const sk0 = b2n(crypto.getRandomValues(new Uint8Array(32))) % (N - 1n) + 1n;
+    const [px, py] = mul(sk0);
+    const d = (py & 1n) ? N - sk0 : sk0;
+    const pub = hex(px);
+    nostrSigner = async (top, contentStr) => {
+      const created_at = Math.floor(Date.now() / 1000), kind = 1, tags = [['t', top]];
+      const ser = JSON.stringify([0, pub, created_at, kind, tags, contentStr]);
+      const idBytes = await sha(enc.encode(ser)), id = hex(b2n(idBytes));
+      const k0 = b2n(await tagH('BIP0340/nonce', n2b(d), n2b(px), idBytes)) % N;
+      const [rx, ry] = mul(k0), k = (ry & 1n) ? N - k0 : k0;
+      const e = b2n(await tagH('BIP0340/challenge', n2b(rx), n2b(px), idBytes)) % N;
+      const s = mod(k + e * d, N);
+      return JSON.stringify(['EVENT', { id, pubkey: pub, created_at, kind, tags, content: contentStr, sig: hex(rx) + hex(s) }]);
+    };
+    return nostrSigner;
+  };
+
+  const startNostrFallback = async () => {
+    if (nostrStarted) return;
+    nostrStarted = true;
+    try { await initNostrSigner(); } catch (e) { return; }
+    NOSTR_443.forEach(url => {
+      try {
+        const ws = new WebSocket(url);
+        const nr = { url, ws, ready: false };
+        ws.onopen = () => {
+          nr.ready = true;
+          topicHandlers.forEach((set, top) => {
+            try { ws.send(JSON.stringify(['REQ', top, { kinds: [1], '#t': [top], since: Math.floor(Date.now() / 1000) - 60 }])); } catch (e) {}
+            set.forEach(fn => fn.onSubAck && fn.onSubAck(nr));
+          });
+        };
+        ws.onmessage = ev => {
+          try {
+            const a = JSON.parse(ev.data);
+            if (a[0] === 'EVENT' && a[2] && a[2].content) {
+              const top = a[1];
+              const set = topicHandlers.get(top);
+              if (set) { const m = JSON.parse(a[2].content); set.forEach(fn => fn(m, nr)); }
+            }
+          } catch (e) {}
+        };
+        ws.onclose = () => { nr.ready = false; };
+        nostrRelays.push(nr);
+      } catch (e) {}
+    });
+  };
+
+  const pubTopic = (top, obj, targetBroker) => {
+    const json = JSON.stringify(obj);
+    const raw = mqttPub(top, json);
+    if (targetBroker && targetBroker.ready && targetBroker.ws && targetBroker.ws.readyState === 1 && targetBroker.send) {
+      targetBroker.send(top, raw);
+      return;
+    }
+    let sentMqtt = false;
+    brokers.forEach(br => {
+      if (br.ready && br.ws && br.ws.readyState === 1) { br.send(top, raw); sentMqtt = true; }
+    });
+    if (!sentMqtt && nostrStarted && nostrSigner) {
+      nostrSigner(top, json).then(evStr => {
+        nostrRelays.forEach(nr => { if (nr.ready && nr.ws.readyState === 1) try { nr.ws.send(evStr); } catch (e) {} });
+      }).catch(() => {});
+    }
+  };
+
+  const fakeRelayStats = () => new Map([
+    ['cp', { type: 'candidate-pair', nominated: true, state: 'succeeded', localCandidateId: 'l', remoteCandidateId: 'r' }],
+    ['l', { candidateType: 'relay' }],
+    ['r', { candidateType: 'relay' }]
+  ]);
+
+  const joinRoom = (cfg, rid) => {
+    if (!cfg || !rid) throw new Error('Trystero: config and roomId required');
+    const appId = cfg.appId || 'trystero';
+    const customUrls = cfg.relayConfig && cfg.relayConfig.urls;
+    ensureBrokers(customUrls);
+
+    const topic = 'sm9/' + appId + '/' + rid;
+    const iceServers = STUN.concat(cfg.turnConfig || []).concat((cfg.rtcConfig && cfg.rtcConfig.iceServers) || []);
+    const peers = {}; // pid -> { lastSeen, broker, brokerTs, pc, dc, qCand, connObj, fastCnt }
+    const seen = {};  // pid -> Set of pktSeq
+    const isDup = (pid, id) => {
+      if (!id) return false;
+      let sset = seen[pid];
+      if (!sset) sset = seen[pid] = new Set();
+      if (sset.has(id)) return true;
+      sset.add(id);
+      if (sset.size > 256) sset.delete(sset.values().next().value);
+      return false;
+    };
+    const actions = {};
+    const pings = {};
+    let joinCb = null, leaveCb = null, left = false, subAcked = brokers.some(b => b.ready);
+    const earlyQueue = [];
+
+    const sendPkt = (pkt, to, fast) => {
+      if (left) return;
+      const msg = Object.assign({ i: ++pktSeq }, pkt, { s: selfId });
+      if (to) msg.d = to;
+      if (!subAcked && !brokers.some(b => b.ready)) {
+        if (earlyQueue.length < 16) earlyQueue.push(msg);
+        return;
+      }
+      if (fast && to) {
+        const p = peers[to];
+        if (p && p.broker && p.broker.ready && Date.now() - p.brokerTs < 4000 && (++p.fastCnt % 15 !== 0)) {
+          pubTopic(topic, msg, p.broker);
+          return;
+        }
+      } else if (fast && !to) {
+        const activeBrokers = new Set();
+        let allFresh = true;
+        const pList = Object.values(peers);
+        pList.forEach(p => {
+          if (p.broker && p.broker.ready && Date.now() - p.brokerTs < 4000) activeBrokers.add(p.broker);
+          else allFresh = false;
+        });
+        if (pList.length > 0 && allFresh && activeBrokers.size > 0 && (pktSeq % 15 !== 0)) {
+          activeBrokers.forEach(br => pubTopic(topic, msg, br));
+          return;
+        }
+      }
+      pubTopic(topic, msg);
+    };
+
+    // --- WebRTC P2P diretto (in parallelo al relay MQTT) ---
+    const setupRtc = (pid, initiator) => {
+      if (left || rid === 'lobby' || typeof RTCPeerConnection === 'undefined') return null;
+      const p = peers[pid];
+      if (!p || p.pc) return p ? p.pc : null;
+      try {
+        const pc = new RTCPeerConnection({ iceServers });
+        p.pc = pc; p.qCand = [];
+        const bindDc = dc => {
+          p.dc = dc;
+          dc.onopen = () => {};
+          dc.onmessage = ev => {
+            if (left) return;
+            p.lastSeen = Date.now();
+            try {
+              const m = JSON.parse(ev.data);
+              if (m.i && isDup(pid, m.i)) return;
+              if (m.t === 'p') { try { dc.send(JSON.stringify({ t: 'o', q: m.q })); } catch (e) {} }
+              else if (m.t === 'o' && pings[m.q]) { pings[m.q](Date.now()); delete pings[m.q]; }
+              else if (m.t === 'm' && m.a && actions[m.a] && actions[m.a].cb) {
+                actions[m.a].cb(m.v, { peerId: pid });
+              }
+            } catch (e) {}
+          };
+          dc.onclose = () => { if (p.dc === dc) p.dc = null; };
+          dc.onerror = () => {};
+        };
+        pc.onicecandidate = ev => {
+          if (ev.candidate && !left) {
+            sendPkt({ t: 'w', w: { c: ev.candidate.toJSON ? ev.candidate.toJSON() : ev.candidate } }, pid, false);
+          }
+        };
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+            p.dc = null;
+          }
+        };
+        if (initiator) {
+          bindDc(pc.createDataChannel('data'));
+          pc.createOffer().then(off => pc.setLocalDescription(off)).then(() => {
+            if (!left && pc.localDescription) sendPkt({ t: 'w', w: { sdp: { type: pc.localDescription.type, sdp: pc.localDescription.sdp } } }, pid, false);
+          }).catch(() => {});
+        } else {
+          pc.ondatachannel = ev => bindDc(ev.channel);
+        }
+        return pc;
+      } catch (e) { return null; }
+    };
+
+    const onRtcSignal = async (pid, w) => {
+      if (left || rid === 'lobby' || !w) return;
+      const p = peers[pid]; if (!p) return;
+      try {
+        if (w.sdp) {
+          const isOffer = w.sdp.type === 'offer';
+          if (isOffer && p.pc && p.pc.signalingState !== 'stable') {
+            if (selfId < pid) return; // tie-break glare
+            try { p.pc.close(); } catch (e) {}
+            p.pc = null; p.dc = null;
+          }
+          const pc = p.pc || setupRtc(pid, false);
+          if (!pc) return;
+          await pc.setRemoteDescription(w.sdp);
+          while (p.qCand && p.qCand.length) {
+            try { await pc.addIceCandidate(p.qCand.shift()); } catch (e) {}
+          }
+          if (isOffer) {
+            const ans = await pc.createAnswer();
+            await pc.setLocalDescription(ans);
+            if (!left && pc.localDescription) {
+              sendPkt({ t: 'w', w: { sdp: { type: pc.localDescription.type, sdp: pc.localDescription.sdp } } }, pid, false);
+            }
+          }
+        } else if (w.c) {
+          const pc = p.pc;
+          if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+            try { await pc.addIceCandidate(w.c); } catch (e) {}
+          } else if (p.qCand && p.qCand.length < 64) {
+            p.qCand.push(w.c);
+          }
+        }
+      } catch (e) {}
+    };
+
+    const touchPeer = (pid, br) => {
+      const now = Date.now();
+      let p = peers[pid];
+      if (!p) {
+        p = peers[pid] = {
+          lastSeen: now,
+          broker: br,
+          brokerTs: now,
+          pc: null,
+          dc: null,
+          qCand: [],
+          fastCnt: 0,
+          connObj: {
+            getStats: async () => {
+              if (p.dc && p.dc.readyState === 'open' && p.pc && typeof p.pc.getStats === 'function') {
+                return p.pc.getStats();
+              }
+              return fakeRelayStats();
+            }
+          }
+        };
+        sendPkt({ t: 'h' }, pid, false);
+        if (selfId < pid) setupRtc(pid, true);
+        if (joinCb) try { joinCb(pid); } catch (e) {}
+      } else {
+        p.lastSeen = now;
+        if (br && br.ready) { p.broker = br; p.brokerTs = now; }
+      }
+      return p;
+    };
+
+    const onMsg = (m, br) => {
+      if (left || !m || !m.s || m.s === selfId) return;
+      if (m.d && m.d !== selfId) return;
+      if (m.i && isDup(m.s, m.i)) return;
+
+      if (m.t === 'l') {
+        const p = peers[m.s];
+        if (p) {
+          if (p.pc) try { p.pc.close(); } catch (e) {}
+          delete peers[m.s];
+          if (leaveCb) try { leaveCb(m.s); } catch (e) {}
+        }
+        return;
+      }
+      const wasKnown = !!peers[m.s];
+      const p = touchPeer(m.s, br);
+      if (m.t === 'j' && wasKnown) {
+        sendPkt({ t: 'h' }, m.s, false);
+        if (selfId < m.s && (!p.pc || p.pc.connectionState === 'failed' || p.pc.connectionState === 'closed')) {
+          p.pc = null; p.dc = null; setupRtc(m.s, true);
+        }
+      } else if (m.t === 'w') {
+        onRtcSignal(m.s, m.w);
+      } else if (m.t === 'p') {
+        sendPkt({ t: 'o', q: m.q }, m.s, true);
+      } else if (m.t === 'o' && pings[m.q]) {
+        pings[m.q](Date.now()); delete pings[m.q];
+      } else if (m.t === 'm' && m.a && actions[m.a] && actions[m.a].cb) {
+        try { actions[m.a].cb(m.v, { peerId: m.s }); } catch (e) {}
+      }
+    };
+
+    onMsg.onSubAck = br => {
+      if (left) return;
+      subAcked = true;
+      pubTopic(topic, { t: 'j', s: selfId, i: ++pktSeq }, br);
+      while (earlyQueue.length) {
+        const qm = earlyQueue.shift();
+        pubTopic(topic, qm);
+      }
+    };
+
+    let set = topicHandlers.get(topic);
+    if (!set) {
+      set = new Set();
+      topicHandlers.set(topic, set);
+      brokers.forEach(br => { if (br.ready && br.ws && br.ws.readyState === 1) try { br.ws.send(mqttSub(topic)); } catch (e) {} });
+      if (nostrStarted) {
+        nostrRelays.forEach(nr => {
+          if (nr.ready && nr.ws.readyState === 1) {
+            try { nr.ws.send(JSON.stringify(['REQ', topic, { kinds: [1], '#t': [topic], since: Math.floor(Date.now() / 1000) - 60 }])); } catch (e) {}
+          }
+        });
+      }
+    }
+    set.add(onMsg);
+    sendPkt({ t: 'j' }, undefined, false);
+
+    const hb = setInterval(() => {
+      if (left) return;
+      sendPkt({ t: 'j' }, undefined, false);
+      const now = Date.now();
+      Object.keys(peers).forEach(pid => {
+        const p = peers[pid];
+        const dcOpen = p.dc && p.dc.readyState === 'open';
+        if (!dcOpen && now - p.lastSeen > 10000) {
+          if (p.pc) try { p.pc.close(); } catch (e) {}
+          delete peers[pid];
+          if (leaveCb) try { leaveCb(pid); } catch (e) {}
+        }
+      });
+    }, 2500);
+
+    return {
+      makeAction: ns => {
+        if (actions[ns]) return actions[ns].api;
+        const entry = { cb: null, api: null };
+        const send = async (data, opts) => {
+          if (left) return;
+          const to = opts && typeof opts === 'object' ? opts.target : (typeof opts === 'string' ? opts : undefined);
+          const fast = ns === 'sn' || ns === 'in', id = ++pktSeq;
+          if (to) {
+            const p = peers[to];
+            if (p && p.dc && p.dc.readyState === 'open' && (p.dc.bufferedAmount || 0) < 65536) {
+              try { p.dc.send(JSON.stringify({ t: 'm', a: ns, v: data, i: id })); return; } catch (e) {}
+            }
+            sendPkt({ t: 'm', a: ns, v: data, i: id }, to, fast);
+          } else {
+            const relayTargets = [], pIds = Object.keys(peers);
+            pIds.forEach(pid => {
+              const p = peers[pid];
+              if (p && p.dc && p.dc.readyState === 'open' && (p.dc.bufferedAmount || 0) < 65536) {
+                try { p.dc.send(JSON.stringify({ t: 'm', a: ns, v: data, i: id })); return; } catch (e) {}
+              }
+              relayTargets.push(pid);
+            });
+            if (!pIds.length || relayTargets.length) {
+              sendPkt({ t: 'm', a: ns, v: data, i: id }, relayTargets.length === 1 ? relayTargets[0] : undefined, fast);
+            }
+          }
+        };
+        const api = [send, fn => { entry.cb = fn; }, () => {}];
+        api.send = send;
+        Object.defineProperty(api, 'onMessage', {
+          get: () => entry.cb,
+          set: fn => { entry.cb = fn; }
+        });
+        entry.api = api;
+        actions[ns] = entry;
+        return api;
+      },
+      get onPeerJoin() { return joinCb; },
+      set onPeerJoin(fn) {
+        joinCb = fn;
+        if (fn) Object.keys(peers).forEach(pid => { try { fn(pid); } catch (e) {} });
+      },
+      get onPeerLeave() { return leaveCb; },
+      set onPeerLeave(fn) { leaveCb = fn; },
+      getPeers: () => {
+        const o = {};
+        Object.keys(peers).forEach(k => { o[k] = peers[k].connObj; });
+        return o;
+      },
+      ping: pid => new Promise((res, rej) => {
+        const p = peers[pid];
+        if (!p) return rej(new Error('no peer'));
+        const q = ++pktSeq, t0 = Date.now();
+        const tm = setTimeout(() => { delete pings[q]; rej(new Error('timeout')); }, 3000);
+        pings[q] = t1 => { clearTimeout(tm); res(t1 - t0); };
+        if (p.dc && p.dc.readyState === 'open') {
+          try { p.dc.send(JSON.stringify({ t: 'p', q })); return; } catch (e) {}
+        }
+        sendPkt({ t: 'p', q }, pid, true);
+      }),
+      leave: () => {
+        if (left) return;
+        left = true;
+        clearInterval(hb);
+        sendPkt({ t: 'l' }, undefined, false);
+        Object.values(peers).forEach(p => { if (p.pc) try { p.pc.close(); } catch (e) {} });
+        const s = topicHandlers.get(topic);
+        if (s) {
+          s.delete(onMsg);
+          if (!s.size) {
+            topicHandlers.delete(topic);
+            brokers.forEach(br => { if (br.ready && br.ws && br.ws.readyState === 1) try { br.ws.send(mqttUnsub(topic)); } catch (e) {} });
+            if (nostrStarted) {
+              nostrRelays.forEach(nr => { if (nr.ready && nr.ws.readyState === 1) try { nr.ws.send(JSON.stringify(['CLOSE', topic])); } catch (e) {} });
+            }
+          }
+        }
+      }
+    };
+  };
+
+  if (typeof addEventListener === 'function') {
+    addEventListener('beforeunload', () => {
+      topicHandlers.forEach((_, top) => {
+        pubTopic(top, { t: 'l', s: selfId, i: ++pktSeq });
+      });
+    });
+  }
+
+  globalThis.Trystero = { joinRoom, selfId };
+})();

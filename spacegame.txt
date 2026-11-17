@@ -1,0 +1,1351 @@
+// SPACE MINI v9.1 - gioco completo in un solo file JS (zero dipendenze)
+// Tastiera: frecce/WASD muovi, Spazio spara, X/Z scatto (invulnerabile + speronante), Maiusc mira precisa (hitbox visibile),
+//           B bomba, P pausa, M muto, 1-5 scelta potenziamento
+// Touch:   trascina per muoverti (fuoco automatico); con un 2o dito: meta' sinistra = scatto, meta' destra = bomba
+// Mouse:   trascina, tasto destro = bomba
+(() => {
+const run = () => {
+  const W = 160, H = 240; // campo di gioco logico 160x240 (verticale): la finestra puo' essere piu' larga, i lati diventano pannelli
+  const vwFor = () => { const v = Math.min(480, Math.max(W, Math.round(H * innerWidth / innerHeight))); return v + (v - W) % 2; }; // sempre pari: il campo cade su pixel interi
+  const vw0 = vwFor();
+  // S = pixel reali per unita' logica, adattato alla tua finestra (es. 1080p -> 5): sprite e testo restano nitidi a qualunque risoluzione
+  const S = Math.max(3, Math.min(globalThis.SG_MAXS || 6, Math.ceil(Math.min(innerWidth / vw0, innerHeight / H) * (globalThis.devicePixelRatio || 1) - .01)));
+  let VW = W, OX = 0; // VW = larghezza della vista (logica), OX = margine sinistro del campo di gioco
+
+  // ---------- Canvas a bassa risoluzione, scalato a tutto schermo ----------
+  const C = document.createElement('canvas');
+  C.style.cssText = 'display:block;margin:0 auto;touch-action:none;background:#000';
+  document.body.style.cssText = 'margin:0;background:#111;overflow:hidden';
+  document.body.append(C);
+  const x = C.getContext('2d');
+  const layout = () => { // il canvas riempie la finestra mantenendo le proporzioni; il campo di gioco resta centrato
+    VW = vwFor(); OX = (VW - W) / 2;
+    C.width = VW * S; C.height = H * S;
+    x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'high';
+    const k = Math.min(innerWidth / VW, innerHeight / H);
+    C.style.width = VW * k + 'px'; C.style.height = H * k + 'px';
+  };
+  addEventListener('resize', layout); layout();
+
+  // ---------- Sprite (ogni carattere = 1 pixel) ----------
+  // Pd = allinea a destra, M = specchia (larghezza pari), O = specchia con colonna centrale (larghezza dispari)
+  const pal = { 1: '#fff', 2: '#8ef', 3: '#f44', 4: '#fd3', 5: '#c6f', 6: '#a96', 7: '#4e6', 8: '#f84', 9: '#99a', a: '#38d', b: '#123', c: '#cde', d: '#a22', e: '#445', f: '#538', g: '#173', h: '#3ac', i: '#f9c', j: '#b52', k: '#ffb', l: '#667' };
+  const Pd = (h, w) => h.map(r => r.padStart(w, '.'));
+  const M = h => h.map(r => r + [...r].reverse().join(''));
+  const O = h => h.map(r => r + [...r].slice(0, -1).reverse().join(''));
+  const raw = {
+    p: O(['.....1', '.....c', '....cc', '....c2', '...ch2', '...ahc', '..cahc', '.cchac', '3cchaa', '3c.abc', 'd9.ebc', '...e9c', '....8.']),   // caccia del giocatore 11x13
+    e: O(['3.....', '.3.ddd', '..d333', '.d3313', 'd33333', 'd3d33d', '.d.d33', '..3.d.']),                                            // drone alieno (frame 1)
+    e_: O(['3.....', '.3.ddd', '..d333', '.d3313', 'd33333', 'd3d33d', '.d..33', '.3..d.']),                                           // drone alieno (frame 2)
+    k: O(['..5...', '.55fff', '55f999', '5f9ll1', '5f9999', '.5ffe9', '.5.fl9', '..5.f.', '...3..']),                                  // corazzato (frame 1)
+    k_: O(['..5...', '.55fff', '55f999', '5f9ll1', '5f9999', '.5ffe9', '.5.fl9', '.5..f.', '..3...']),                                 // corazzato (frame 2)
+    s: O(['....3', '....h', '....h', '...ah', '..aa2', '.aha2', 'ahaaa', 'ab.aa', '...e9', '....8']),                                  // cecchino
+    t: O(['...eeee', '..e9999', '.e99ll9', 'e99l119', 'e9999l9', 'e9d99d9', '.e9lll9', '..e9d99', '.3.e..9', '.3.....']),             // carro armato
+    x: O(['.g....', '.g7777', 'g7778g', '7778kg', '77778g', 'g7777g', '.g778g', '..g.gg', '.g..g.']),                                  // splitter
+    z: O(['...8', '..88', '..k8', '.888', '.838', '8838', '8.38', '...3', '..4.', '..4.']),                                          // kamikaze
+    n: ['.7.7.', '77777', '7k7k7', '77777', '.7.7.'],                                                                                 // mini-splitter
+    l: O(['....999', '..99lll', '.9aal11', '9999999', '9e9e8e8', '.3...3.']),                                                       // posamine
+    o: O(['......22', '....2a22', '...2aaa2', '..999999', '99999999', '9l4l4l4l', '.9llllll', '....9e9e']),                          // UFO
+    m: O(['...8', '.8.3', '..83', '833k', '..83', '.8.3', '...8']),                                                                  // mina
+    f: O(['c....9', 'cc..99', 'chc9h2', '.chha2', '..caaa', '...ab1', '....a3', '.....3']),                                          // caccia nemico
+    q: O(['..999', '.9ccl', '9cc11', '9c133', '9l133', '9ll13', '.9lll', '..9ee']),                                                   // satellite del boss
+    d: O(['...2', '..22', '.2c1', '2chh', '.299', '..94', '...8']),                                                                   // drone alleato
+    b: ['.1.', '.1.', '212', '.2.', '.2.', '.a.'],                                                                                    // proiettile giocatore
+    c: ['.888.', '8kkk8', '8k1k8', '8kkk8', '.888.'],                                                                                 // proiettile nemico
+    v: ['.555.', '5iii5', '5i1i5', '5iii5', '.555.'],                                                                                 // proiettile boss
+    B0: M(Pd(['..8..8..8..8.', '..e..e..e..e.', '.eeeeeeeeeeee', 'e9999999llll9', 'e99dd99llll99', 'e9d33d9lllccc', 'e99dd999lcc11', 'e9999999cc11c',
+             '.e999llhhhh1c', '.e99llhhhhh11', '..e99lllhh1cc', '...e999llllcc', '....e99999lll', '.....ee999lll', '......e9d3999', '.......e99999',
+             '........ee999', '..........3d3'], 13)),                                                                                  // boss: corazzata 26x18
+    B1: M(Pd(['.8..8..8..8..8.', '.e..e..e..e..e.', 'eeeeeeeeeeeeeee', 'e9999999999999c', 'e9llllllll9ddd9', 'e9leeeell9ddd9c', 'e9l3333ll9ddd9c',
+             'e9leeeell9999c1', 'e999999999hhh11', '.e99999lllhhhc1', '..e999999lllccc', '...eeee99999999', '.....e9e9e9e9e9', '.......3.3.3.3.'], 15)), // boss: portaerei 30x14
+    B2: M(Pd(['......ffffff', '....fffffff5', '..ffff55555c', '.fff555ccc99', '.f55cc111111', 'ff5c111111dd', 'f5c11111d333', 'f5c1111d33bb', 'f5c1111d33bb',
+             'f5c1111d33bb', 'f5c11111d333', 'ff5c111111dd', '.f55cc111111', '.fff555ccc99', '..ffff55555c', '....fffffff5', '......fff.ff', '.......f..f.'], 12)), // boss: occhio 24x18
+    B3: M(Pd(['....eeeee9', '..ee99lll9', '.e99llcccc', 'e9ll33333c', 'e9l3388883', 'e9l3884kk8', 'e9l388k111', 'e9l388k111', 'e9l3884kk8', 'e9l3388883',
+             'e9ll33333c', '.e9l3333c1', '.e99llcccc', '..ee99lll9', '....eeeee9', '.......e.e'], 10)),                              // boss: nucleo 20x16
+    B4: M(Pd(['5...5...5.ff.', '55..55..5fff5', '5f5.5f55ffff5', '.5f55ffffff55', '..5ffffffiii5', '..5ff5555ii11', '.5ff555iiii11', '.5f55ii113331', '.5f55ii113331',
+             '..5ff5iiiiii1', '...5ff555iiii', '....5ffff55ff', '.....5ffffff5', '......5fffff5', '.......5fff5f', '........5ff55', '.........5ii5', '.........3..3'], 13)), // boss: regina 26x18
+  };
+  const mkc = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return [c, c.getContext('2d')]; };
+  const rgb = h => { h = h.replace('#', ''); if (h.length === 3) h = h.replace(/./g, '$&$&'); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; };
+  const toCanvas = (w, h, data) => { const [c, g] = mkc(w, h), id = g.createImageData(w, h); id.data.set(data); g.putImageData(id, 0, 0); return c; };
+  const ramp = (st, r) => { // interpolazione tra fermate [posizione, [r,g,b,a]]
+    let q = 0; while (q < st.length - 2 && r > st[q + 1][0]) q++;
+    const a = st[q], b = st[q + 1], f = Math.min(1, Math.max(0, (r - a[0]) / Math.max(1e-6, b[0] - a[0])));
+    return [0, 1, 2, 3].map(c => a[1][c] + (b[1][c] - a[1][c]) * f);
+  };
+  const radial = (w, h, st) => { // sfera luminosa
+    const o = new Uint8ClampedArray(w * h * 4);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+      const r = Math.hypot((i + .5 - w / 2) / (w / 2), (j + .5 - h / 2) / (h / 2));
+      if (r < 1) o.set(ramp(st, r), (j * w + i) * 4);
+    }
+    return toCanvas(w, h, o);
+  };
+  const capsule = (w, h, st) => { // proiettile allungato con alone
+    const o = new Uint8ClampedArray(w * h * 4);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+      const yc = Math.min(Math.max(j + .5, w / 2), h - w / 2), r = Math.hypot((i + .5 - w / 2) / (w / 2), (j + .5 - yc) / (w / 2));
+      if (r < 1) o.set(ramp(st, r), (j * w + i) * 4);
+    }
+    return toCanvas(w, h, o);
+  };
+  // Pixel-art -> alta densita': Scale3x (diagonali morbide) + mappa di altezza dalla distanza dal bordo,
+  // illuminazione da sinistra-alto (rilievo, riflessi), contorno scuro, giunzioni tra pannelli e leggera grana.
+  const SH = 3; // risoluzione interna dell'elaborazione (Scale3x); il risultato viene poi portato a S
+  const rescale = c => { if (S === SH) return c; const [o, g] = mkc(c.width / SH * S, c.height / SH * S); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(c, 0, 0, o.width, o.height); return o; };
+  const EM = { 1: .3, 2: .5, 3: .7, 4: .35, 8: .5, k: .4 }; // colori "luminosi": ombreggiatura ridotta
+  const hires = (rows, pa) => {
+    const w = rows[0].length, h = rows.length, W3 = w * SH, H3 = h * SH, N = W3 * H3, rc = {};
+    for (const kk in pa) rc[kk] = rgb(pa[kk]);
+    const key = (i, j) => i < 0 || j < 0 || i >= w || j >= h || !pa[rows[j][i]] ? '.' : rows[j][i];
+    const K = new Array(N);
+    for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) {
+      const A = key(i - 1, j - 1), B = key(i, j - 1), Cc = key(i + 1, j - 1), D = key(i - 1, j), E = key(i, j), F = key(i + 1, j), G = key(i - 1, j + 1), Hh = key(i, j + 1), I = key(i + 1, j + 1);
+      const o = [E, E, E, E, E, E, E, E, E];
+      if (D === B && B !== F && D !== Hh) o[0] = D;
+      if ((D === B && B !== F && D !== Hh && E !== Cc) || (B === F && B !== D && F !== Hh && E !== A)) o[1] = B;
+      if (B === F && B !== D && F !== Hh) o[2] = F;
+      if ((D === B && B !== F && D !== Hh && E !== G) || (D === Hh && D !== B && Hh !== F && E !== A)) o[3] = D;
+      if ((B === F && B !== D && F !== Hh && E !== I) || (F === Hh && F !== B && Hh !== D && E !== Cc)) o[5] = F;
+      if (D === Hh && D !== B && Hh !== F) o[6] = D;
+      if ((D === Hh && D !== B && Hh !== F && E !== I) || (F === Hh && F !== B && Hh !== D && E !== G)) o[7] = Hh;
+      if (F === Hh && F !== B && Hh !== D) o[8] = F;
+      for (let q = 0; q < 9; q++) K[(j * SH + (q / 3 | 0)) * W3 + i * SH + q % 3] = o[q];
+    }
+    const d = new Float32Array(N);
+    for (let y = 0; y < H3; y++) for (let xx = 0; xx < W3; xx++) {
+      const i = y * W3 + xx; if (K[i] === '.') continue;
+      d[i] = Math.min(1e3, (xx ? d[i - 1] : 0) + 1, (y ? d[i - W3] : 0) + 1, xx && y ? d[i - W3 - 1] + 1.41 : 1.41, xx < W3 - 1 && y ? d[i - W3 + 1] + 1.41 : 1.41);
+    }
+    for (let y = H3 - 1; y >= 0; y--) for (let xx = W3 - 1; xx >= 0; xx--) {
+      const i = y * W3 + xx; if (K[i] === '.') continue;
+      d[i] = Math.min(d[i], (xx < W3 - 1 ? d[i + 1] : 0) + 1, (y < H3 - 1 ? d[i + W3] : 0) + 1, xx < W3 - 1 && y < H3 - 1 ? d[i + W3 + 1] + 1.41 : 1.41, xx && y < H3 - 1 ? d[i + W3 - 1] + 1.41 : 1.41);
+    }
+    const R = Math.max(4, Math.min(12, Math.min(w, h) * SH * .22)), HT = new Float32Array(N);
+    for (let i = 0; i < N; i++) { const v = Math.min(d[i], R) / R; HT[i] = 1 - (1 - v) * (1 - v); }
+    const at = (xx, y) => HT[Math.max(0, Math.min(H3 - 1, y)) * W3 + Math.max(0, Math.min(W3 - 1, xx))];
+    const lum = kk => { const c = rc[kk]; return c[0] * .3 + c[1] * .59 + c[2] * .11; };
+    const out = new Uint8ClampedArray(N * 4);
+    for (let y = 0; y < H3; y++) for (let xx = 0; xx < W3; xx++) {
+      const i = y * W3 + xx, kk = K[i]; if (kk === '.') continue;
+      const gx = (at(xx + 1, y) - at(xx - 1, y)) * 2.2, gy = (at(xx, y + 1) - at(xx, y - 1)) * 2.2;
+      const lam = Math.max(0, (-gx * -.5 - gy * -.6 + .62) / Math.hypot(gx, gy, 1)), em = EM[kk] || 1;
+      let f = 1 + (Math.min(1.6, Math.max(.45, 1 + 1.5 * (lam - .62))) - 1) * em;
+      if (d[i] <= 1.5) f *= .62;
+      const nb = [xx ? K[i - 1] : '.', xx < W3 - 1 ? K[i + 1] : '.', y ? K[i - W3] : '.', y < H3 - 1 ? K[i + W3] : '.'];
+      if (nb.some(q => q !== '.' && q !== kk && lum(q) > lum(kk))) f *= .8;
+      f *= 1 + ((Math.sin(xx * 12.9898 + y * 78.233) * 43758.5453 % 1 + 1) % 1 - .5) * .06;
+      const c = rc[kk], sp = f > 1.25 ? (f - 1.25) * 140 * em : 0;
+      out[i * 4] = c[0] * f + sp; out[i * 4 + 1] = c[1] * f + sp; out[i * 4 + 2] = c[2] * f + sp; out[i * 4 + 3] = 255;
+    }
+    return rescale(toCanvas(W3, H3, out));
+  };
+  // asteroidi: sfera illuminata con bordo irregolare, grana e crateri
+  const rockHi = (w, h, sd) => {
+    const W3 = w * S, H3 = h * S, o = new Uint8ClampedArray(W3 * H3 * 4), cr = [[.3, -.2, .3], [-.35, .3, .24], [.1, .5, .17], [-.1, -.45, .14]];
+    for (let j = 0; j < H3; j++) for (let i = 0; i < W3; i++) {
+      const dx = (i + .5 - W3 / 2) / (W3 / 2), dy = (j + .5 - H3 / 2) / (H3 / 2), a = Math.atan2(dy, dx), r = Math.hypot(dx, dy);
+      const ed = .86 + .09 * Math.sin(a * 3 + sd) + .05 * Math.sin(a * 5 + sd * 2) + .03 * Math.sin(a * 9 + sd * 3);
+      if (r > ed) continue;
+      const q = r / ed, z = Math.sqrt(Math.max(0, 1 - q * q)) + .2, nx = dx / ed, ny = dy / ed;
+      let sh = .22 + 1.05 * Math.max(0, (-.5 * nx - .6 * ny + .62 * z) / Math.hypot(nx, ny, z));
+      sh *= .86 + .28 * (Math.sin(i * .93 + j * 1.71 + sd) * Math.cos(j * 1.13 - i * .61 + sd * 2) * .5 + .5);
+      cr.forEach(c => { const dd = Math.hypot(dx - c[0], dy - c[1]) / c[2]; if (dd < 1) sh *= dd < .8 ? .62 : ((-.5 * (dx - c[0]) - .6 * (dy - c[1]) > 0) ? 1.35 : .75); });
+      if (q > .93) sh *= .7;
+      const f = Math.min(1.25, sh), k = (j * W3 + i) * 4;
+      o[k] = 60 + 170 * f; o[k + 1] = 44 + 140 * f; o[k + 2] = 32 + 110 * f; o[k + 3] = 255;
+    }
+    return toCanvas(W3, H3, o);
+  };
+  const spr = {}, sw = {}, SZ = {}; // SZ = dimensioni LOGICHE (le sprite reali sono S volte piu' grandi)
+  for (const k in raw) { spr[k] = hires(raw[k], pal); SZ[k] = [raw[k][0].length, raw[k].length]; }
+  spr.p0 = spr.p; spr.p1 = hires(raw.p, Object.assign({}, pal, { a: '#d62', h: '#e93', 2: '#fda', c: '#ecd' })); spr.p2 = hires(raw.p, Object.assign({}, pal, { a: '#3a4', h: '#5c6', 2: '#cfc', c: '#dec' }));
+  SZ.p0 = SZ.p1 = SZ.p2 = SZ.p;
+  spr.a = rockHi(9, 8, 1); SZ.a = [9, 8]; spr.A = rockHi(18, 16, 2); SZ.A = [18, 16];
+  spr.c = radial(5 * S, 5 * S, [[0, [255, 255, 255, 255]], [.3, [255, 240, 160, 255]], [.65, [255, 120, 40, 255]], [1, [255, 60, 20, 0]]]);
+  spr.v = radial(5 * S, 5 * S, [[0, [255, 255, 255, 255]], [.3, [255, 200, 255, 255]], [.65, [200, 90, 255, 255]], [1, [160, 60, 255, 0]]]);
+  spr.b = capsule(3 * S, 6 * S, [[0, [255, 255, 255, 255]], [.4, [160, 240, 255, 255]], [.8, [60, 160, 255, 255]], [1, [40, 100, 255, 0]]]);
+  // sagome bianche per il lampo quando un nemico viene colpito
+  for (const k in spr) {
+    const [o, g] = mkc(spr[k].width, spr[k].height);
+    g.drawImage(spr[k], 0, 0); g.globalCompositeOperation = 'source-in'; g.fillStyle = '#fff'; g.fillRect(0, 0, o.width, o.height);
+    sw[k] = o;
+  }
+
+  // ---------- Audio (beep sintetici, M = muto) ----------
+  let ac, mute = 0;
+  const snd = (f, d, ty = 'square', sl = 0) => {
+    if (net && net.role === 'host' && d >= .06) evq.push(['s', f, d, ty, sl]); // i client riproducono i suoni importanti
+    if (mute) return;
+    try {
+      ac = ac || new AudioContext();
+      if (ac.state === 'suspended') ac.resume();
+      const o = ac.createOscillator(), g = ac.createGain(), n = ac.currentTime;
+      o.type = ty; o.frequency.setValueAtTime(f, n);
+      if (sl) o.frequency.linearRampToValueAtTime(Math.max(30, f + sl), n + d);
+      g.gain.setValueAtTime(.03, n); g.gain.linearRampToValueAtTime(.0001, n + d);
+      o.connect(g); g.connect(ac.destination);
+      o.start(n); o.stop(n + d);
+    } catch (e) {}
+  };
+
+  // ---------- Stato ----------
+  // st: 0 titolo, 1 gioco, 2 game over, 3 scelta potenziamento, 4 cerca partita, 5 sala (host), 6 sala (ospite)
+  let st = 0, sc = 0, hi = 0, wave = 0, t = 0, bn = 0, ov = 0, shake = 0, fl = 0;
+  let nl = 2000, wt = 0, pz = 0, pid = null, touch = 0, lx = 0, ly = 0;
+  let ks = 0, mc = 0, pf = 1, nr = 0, ev = null, msg = '', rk = 0, mx = 0, pickT = 0, pidN = 0, note = '', escT = -999;
+  // p = giocatore "corrente": la logica di gioco lavora su p; P = tutti i giocatori, ME = indice di quello locale
+  let p, P = [], ME = 0, net = null, bs = [], es = [], eb = [], ps = [], us = [], fx = [], rg = [];
+  const keys = {}, evq = [];
+  try { hi = +localStorage.hi || 0; } catch (e) {}
+  const stars = Array.from({ length: 140 }, () => { const l = Math.random() * 3 | 0; return [Math.random() * 480, Math.random() * H, .25 + l * .35, l]; });
+  const SC = ['#336', '#558', '#99c'];
+  // pianeti (texture generate a codice: fasce, luce laterale, atmosfera) e nebulose morbide
+  const PLC = [[[70, 120, 190], [30, 50, 100], [120, 200, 255]], [[190, 110, 60], [90, 40, 20], [255, 190, 120]], [[90, 170, 100], [30, 80, 50], [170, 255, 180]], [[170, 90, 140], [70, 30, 70], [255, 170, 220]]];
+  const planetHi = (c, sd) => {
+    const n = 50 * S, o = new Uint8ClampedArray(n * n * 4), R0 = n / 2 / 1.08;
+    for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      const dx = (i + .5 - n / 2) / R0, dy = (j + .5 - n / 2) / R0, r = Math.hypot(dx, dy), k = (j * n + i) * 4;
+      if (r < 1) {
+        const z = Math.sqrt(1 - r * r), lam = Math.max(0, -.6 * dx - .5 * dy + .62 * z), bd = .5 + .5 * Math.sin(dy * 7 + Math.sin(dx * 4 + sd) * 1.6 + sd);
+        const sh = .12 + 1.05 * Math.pow(lam, .8), rim = Math.pow(1 - z, 3) * .6 * (.3 + lam);
+        for (let q = 0; q < 3; q++) o[k + q] = (c[0][q] + (c[1][q] - c[0][q]) * bd * .6) * sh + c[2][q] * rim;
+        o[k + 3] = 255;
+      } else if (r < 1.08) {
+        const a = (1.08 - r) / .08, lit = .3 + .7 * Math.max(0, (-.6 * dx - .5 * dy) / r);
+        for (let q = 0; q < 3; q++) o[k + q] = c[2][q];
+        o[k + 3] = a * a * 110 * lit;
+      }
+    }
+    return toCanvas(n, n, o);
+  };
+  const planets = PLC.map((c, i) => planetHi(c, i * 2.3));
+  const nebI = [[120, 60, 200], [40, 100, 220], [200, 60, 140]].map(c => radial(40 * S, 40 * S, [[0, [c[0], c[1], c[2], 70]], [.5, [c[0], c[1], c[2], 28]], [1, [c[0], c[1], c[2], 0]]]));
+  const neb = [{ x: .15, y: 60, s: 2, i: 0, v: .1 }, { x: .75, y: 150, s: 2.4, i: 1, v: .16 }, { x: .45, y: 220, s: 1.8, i: 2, v: .13 }]; // x = frazione della larghezza
+  const pl = { x: .7, y: -30, r: 16, i: 0 };
+  //          arma     scudo   rapido  bomba   missili droni   laser   tempo   overdrive assorbi
+  const UC = ['#fd3', '#3cf', '#4e6', '#f84', '#c6f', '#6ff', '#8cf', '#ddd', '#f8c', '#6f8'];
+  const UN = ['ARMA +', 'SCUDO', 'RAPIDO', 'BOMBA', 'MISSILI', 'DRONI', 'LASER', 'TEMPO', 'SOVRACCARICO', 'ASSORBI'];
+  const PW = [3, 3, 3, 2, 3, 2, 2, 2, 2, 2];
+  const TM = { sh: 300, rf: 360, hm: 540, dt: 800, ls: 420, sl: 200, od: 480, ab: 360 }; // durate base dei power-up
+  // icone dei power-up (9x9: cornice colorata + glifo 5x5)
+  const GL = [['#.#.#', '#.#.#', '#.#.#', '.###.', '..#..'], ['.###.', '#...#', '#...#', '.#.#.', '..#..'], ['..##.', '.##..', '.###.', '..##.', '.#...'],
+    ['..#..', '.###.', '#####', '#####', '.###.'], ['..#..', '.###.', '.###.', '.#.#.', '.#.#.'], ['#...#', '.###.', '..#..', '.###.', '#...#'],
+    ['..#..', '..#..', '..#..', '..#..', '.###.'], ['#####', '.###.', '..#..', '.###.', '#####'], ['..#..', '#.#.#', '.###.', '#.#.#', '..#..'],
+    ['.###.', '#...#', '#.#.#', '#...#', '.###.']];
+  const puS = UC.map((col, k) => {
+    const lt = '#' + rgb(col).map(v => (v + (255 - v) * .45 | 0).toString(16).padStart(2, '0')).join(''), rows = [];
+    for (let j = 0; j < 9; j++) {
+      let r = '';
+      for (let i = 0; i < 9; i++) {
+        const corner = (i === 0 || i === 8) && (j === 0 || j === 8), border = i === 0 || i === 8 || j === 0 || j === 8, gl = i >= 2 && i < 7 && j >= 2 && j < 7 && GL[k][j - 2][i - 2] === '#';
+        r += corner ? '.' : border ? 'C' : gl ? 'G' : 'b';
+      }
+      rows.push(r);
+    }
+    return hires(rows, { C: col, G: lt, b: '#0a1830' });
+  });
+  const pk = () => { let r = Math.random() * PW.reduce((a, b) => a + b); for (let i = 0; i < PW.length; i++) if ((r -= PW[i]) < 0) return i; return 0; };
+  const UP = [ // potenziamenti permanenti: [nome, descrizione, effetto, ancora disponibile?]
+    ['DANNO +1', 'proiettili piu forti', () => p.dm++, () => p.dm < 6],
+    ['VELOCITA +', 'nave piu rapida', () => p.sp += .5, () => p.sp < 4.4],
+    ['VITA MAX +1', 'max vite +1 e +1 vita', () => { p.ml++; p.lv = Math.min(p.lv + 1, p.ml); }, () => p.ml < 5],
+    ['MAGNETE', 'attira i power-up', () => p.mg++, () => p.mg < 3],
+    ['BOMBE +2', 'due bombe in piu', () => p.bm = Math.min(p.bm + 2, 6)],
+    ['LOOT +', 'piu drop dai nemici', () => p.lk++, () => p.lk < 4],
+    ['CADENZA +', 'fuoco piu rapido', () => p.fr++, () => p.fr < 4],
+    ['SCUDO AUTO', 'scudo a ogni ondata', () => p.as++, () => p.as < 3],
+    ['DRONE FISSO', 'un drone permanente', () => p.dn++, () => p.dn < 2],
+    ['MISSILI FISSI', 'missili a ricerca sempre', () => p.mp = 1, () => !p.mp],
+    ['DURATA +', 'power-up durano +40%', () => p.du++, () => p.du < 3],
+    ['COMBO +', 'la combo dura di piu', () => p.cb++, () => p.cb < 3],
+    ['ARMA BASE +', 'arma minima +1 livello', () => { p.wm++; p.w = Math.max(p.w, p.wm); }, () => p.wm < 3],
+    ['RIFLESSI', 'piu invulnerabilita', () => p.iv++, () => p.iv < 3],
+    ['SCATTO RAPIDO', 'scatto si ricarica prima', () => p.dr++, () => p.dr < 3],
+    ['SCATTO ONDA', 'lo scatto cancella colpi', () => p.dw = 1, () => !p.dw],
+    ['FUOCO MIRATO', 'mira precisa: +1 danno', () => p.fd = 1, () => !p.fd],
+  ];
+  // tipi nemici: [larghezza, altezza] dalle sprite, vita, punti
+  const E = (k, hp, pts) => [SZ[k][0], SZ[k][1], hp, pts];
+  const ET = { e: E('e', 1, 10), k: E('k', 2, 30), s: E('s', 3, 40), t: E('t', 6, 60), x: E('x', 2, 25), z: E('z', 1, 15), n: E('n', 1, 8),
+               l: E('l', 3, 50), o: E('o', 4, 200), m: E('m', 1, 5), f: E('f', 2, 35), q: E('q', 8, 40) };
+  const COL = { e: '#f44', k: '#c6f', s: '#36c', t: '#889', x: '#4e6', z: '#f84', n: '#4e6', m: '#f84', l: '#889', o: '#889', a: '#a96', B: '#c6f', f: '#3ac', q: '#889' };
+  const BN = ['CORAZZATA', 'PORTAEREI', 'OCCHIO', 'NUCLEO', 'REGINA'];
+  const trn = e => e.tr || 'azmnofq'.includes(e.k); // transitori: non bloccano la fine ondata e non costano vite se escono
+  const cl = (v, a, b) => Math.max(a, Math.min(b, v));
+  const dur = (v, q = p) => v * (1 + q.du * .4) | 0;
+  const ov2 = (a, aw, ah, b, bw, bh) => a.x < b.x + bw && a.x + aw > b.x && a.y < b.y + bh && a.y + ah > b.y;
+  const mult = () => Math.min(1 + ((p ? p.cmb : 0) >> 2) + (p && p.od > 0 ? 2 : 0), 8);
+  // "minaccia": cresce con l'ondata, con i potenziamenti raccolti e con quanto giochi bene (rk)
+  const upAvg = () => P.length ? P.reduce((a, q) => a + q.up, 0) / P.length : 0;
+  const tf = () => 1 + .6 * Math.max(0, P.length - 1); // in cooperativa i nemici hanno piu' vita: x1.6 in due, x2.2 in tre
+  const dif = () => wave + upAvg() * .6 + rk;
+  const hpm = () => (1 + Math.max(0, dif() - 4) * .12) * tf(); // moltiplicatore vita nemici
+  // hitbox del giocatore: 5x5 al centro della navicella. Per un giocatore remoto l'host la sposta in avanti della latenza stimata
+  // (compensazione): i colpi vengono giudicati dove il giocatore vede la propria nave, non dove l'host la conosceva 50-100 ms fa.
+  const hbx = () => { const l = p.lead || 0, d = p.ds > 0; return { x: cl(p.x + (d ? p.dvx : p.vx) * l, 0, W - 11) + 3, y: cl(p.y + (d ? p.dvy : p.vy) * l, 96, 212) + 5 }; };
+  const r1 = v => Math.round(v * 10) / 10;
+  const pop = (px, py, s, c = '#fff') => { if (net && net.role === 'host') evq.push(['p', r1(px), r1(py), s, c]); if (fx.length < 10) fx.push({ x: cl(px, 32, W - 32), y: py, s, c, l: 40 }); };
+  const ring = (rx, ry, c, l = 20) => { if (net && net.role === 'host') evq.push(['r', r1(rx), r1(ry), c, l]); rg.push({ x: rx, y: ry, r: 3, l, m: l, c }); };
+  const sb = (cx, cy, vx, vy, o) => eb.push({ x: cx - 2.5, y: cy - 2.5, vx, vy, ...o }); // proiettile nemico centrato in (cx, cy)
+  const mk = (k, o) => { const d = ET[k], e = { k, w: d[0], h: d[1], hp: d[2], ...o }; e.mh = e.hp; es.push(e); };
+  const add = (k, ox, y, ph = 0, amp = 12) => {
+    mk(k, { hp: Math.max(ET[k][2], Math.round(ET[k][2] * hpm())), x: ox, y, ox, ph, amp, am0: amp, cd: 60 + (Math.random() * 60 | 0) });
+    const e = es[es.length - 1], d = dif();
+    if (d > 8 && 'eksx'.includes(k) && Math.random() < Math.min((d - 8) * .025, .3)) e.af = Math.random() < .5 ? 1 : 2; // elite: 1 = esplode alla morte, 2 = veloce
+  };
+  const kind = () => {
+    const r = Math.random(), d = dif();
+    if (wave >= 5 && r < Math.min(.07 + d * .004, .2)) return 't';
+    if (wave >= 3 && r < Math.min(.15 + d * .006, .32)) return 's';
+    if (wave >= 2 && r < Math.min(.25 + d * .008, .45)) return 'x';
+    return wave >= 2 && Math.random() < Math.min(.15 + d * .02, .6) ? 'k' : 'e';
+  };
+  const rock = (big, rx, ry, vx) => es.push({ k: 'a', x: rx, y: ry, w: big ? 18 : 9, h: big ? 16 : 8, hp: Math.round((big ? 5 : 2) * Math.max(1, hpm() * .7)), mh: 0, vx, vy: .6 + Math.random() * .5, big });
+  const zed = zx => mk('z', { x: zx, y: -10, a: 1.57, sp: 1.5 + Math.min(dif() * .05, 1.6) });
+  const ufo = () => { const d = Math.random() < .5 ? 1 : -1; mk('o', { hp: Math.round(4 * hpm()), x: d > 0 ? -15 : W, y: 22, vx: d * .8 }); };
+  const fgt = side => mk('f', { hp: Math.max(2, Math.round(2 * hpm())), x: side < 0 ? -12 : W + 1, y: 18 + Math.random() * 50, vx: -side * 1.5, cd: 25 });
+  // Picchiata: traiettoria calcolata sul tempo REALE per raggiungere la quota del giocatore
+  const dive = e => {
+    e.dv = 1; e.tel = 0; e.ox = e.x; e.amp = 0;
+    e.vy = (1.5 + Math.min(dif() * .04, 1.3)) * (e.af === 2 ? 1.3 : 1);
+    const f = Math.max(25, (p.y - e.y) / e.vy);
+    e.vx = cl((p.x + 5 - e.x - e.w / 2) / f, -1.6, 1.6);
+  };
+  const launch = (e, n) => { // la portaerei lancia droni in picchiata (transitori)
+    for (let i = 0; i < n; i++) {
+      const d = ET.e, o = { k: 'e', tr: 1, x: e.x + 4 + i * ((e.w - 16) / Math.max(1, n - 1)), y: e.y + e.h - 4, w: d[0], h: d[1], hp: 1, ph: 0, amp: 0, am0: 0 };
+      o.ox = o.x; dive(o); es.push(o);
+    }
+    snd(250, .15);
+  };
+  const pods = (e, n) => { for (let i = 0; i < n; i++) mk('q', { par: e, ang: i * 6.283 / n, x: e.x, y: e.y, cd: 60 + i * 25, hp: Math.round(ET.q[2] * hpm()) }); };
+
+  // ---------- Giocatori (1-3): ognuno ha stato, potenziamenti, vite, combo e comandi propri ----------
+  const freshP = () => ({ x: 74, y: 212, px: 74, vx: 0, vy: 0, bank: 0, cd: 0, inv: 0, w: 1, sh: 0, rf: 0, hm: 0, bm: 1, dm: 1, sp: 2.6, mg: 0, lk: 0, dn: 0, dt: 0, ls: 0, sl: 0, fr: 0, as: 0,
+    od: 0, ab: 0, wm: 1, mp: 0, du: 0, cb: 0, iv: 0, ds: 0, dc: 0, dg: 0, dvx: 0, dvy: 0, dr: 0, dw: 0, fd: 0, fc: 0, up: 0,
+    lv: 3, ml: 3, alive: 1, cmb: 0, ct: 0, gr: 0, ch: [], pk: -1, dro: [], gh: [], dst: 0, ack: 0 });
+  const newP = (i, extra) => Object.assign(freshP(), { pid: ++pidN, name: 'P' + (i + 1), q: [], last: null }, extra);
+  const resetP = q => { const keep = { pid: q.pid, name: q.name, local: q.local, peer: q.peer, q: q.q, last: q.last }; Object.keys(q).forEach(k => delete q[k]); Object.assign(q, freshP(), keep); };
+  const want = { dash: 0, bomb: 0, mx: 0, my: 0 }; // azioni e spostamenti richiesti dal giocatore locale, consumati a ogni tick
+  const readLocalInput = () => {
+    const b = { l: keys.ArrowLeft || keys.KeyA ? 1 : 0, r: keys.ArrowRight || keys.KeyD ? 1 : 0, u: keys.ArrowUp || keys.KeyW ? 1 : 0, d: keys.ArrowDown || keys.KeyS ? 1 : 0,
+      fire: keys.Space || touch ? 1 : 0, fc: keys.ShiftLeft || keys.ShiftRight ? 1 : 0, dash: want.dash, bomb: want.bomb, mx: want.mx, my: want.my };
+    want.dash = want.bomb = want.mx = want.my = 0;
+    return b;
+  };
+  // Un passo di movimento: identico su host, solo e client (il client lo usa anche per predire il proprio movimento)
+  const stepMove = (q, b) => {
+    const ix = b.r - b.l, iy = b.d - b.u, nrm = ix && iy ? .7071 : 1, spd = q.sp * (b.fc ? .45 : 1);
+    q.fc = b.fc;
+    if (b.dash && q.dc <= 0 && q.ds <= 0) {
+      let dx = ix, dy = iy; if (!dx && !dy) dx = q.bank < 0 ? -1 : 1;
+      const n = Math.hypot(dx, dy);
+      q.dvx = dx / n * 6.5; q.dvy = dy / n * 6.5; q.ds = 8; q.dg = 16; q.dc = Math.max(20, 55 - q.dr * 12); q.dst = 1;
+    }
+    if (q.ds > 0) { q.ds--; q.x += q.dvx; q.y += q.dvy; }
+    else { q.vx += (ix * nrm * spd - q.vx) * .4; q.vy += (iy * nrm * spd * .8 - q.vy) * .4; q.x += q.vx + b.mx; q.y += q.vy + b.my; }
+    q.x = cl(q.x, 0, W - 11); q.y = cl(q.y, 96, 212);
+    q.bank += (q.x - q.px - q.bank) * .25; q.px = q.x;
+    q.dc--; q.dg--;
+  };
+  const NEUTRAL = { l: 0, r: 0, u: 0, d: 0, fire: 0, fc: 0, dash: 0, bomb: 0, mx: 0, my: 0 };
+  const nextInput = q => { // comandi del tick: locali dalla tastiera/touch, remoti dalla coda ricevuta dalla rete
+    if (q.local) return readLocalInput();
+    let f = q.q.shift();
+    if (q.q.length > 6) q.q.splice(0, q.q.length - 3); // niente accumulo di ritardo: scarta i comandi piu' vecchi
+    if (f) { q.ack = f.s; q.last = f.b; return f.b; }
+    return Object.assign({}, q.last || NEUTRAL, { dash: 0, bomb: 0, mx: 0, my: 0 }); // nessun pacchetto: ripete l'ultimo stato dei tasti
+  };
+  const tgt = e => { let best = null, bd = 1e9; for (const q of P) { if (!q.alive) continue; const d = (q.x - e.x) ** 2 + (q.y - e.y) ** 2; if (d < bd) { bd = d; best = q; } } return best || P[0]; };
+  const offer = () => UP.map((u, i) => i).filter(i => !UP[i][3] || UP[i][3]()).sort(() => Math.random() - .5).slice(0, 5);
+
+  // ---------- Ondate: 6 formazioni a rotazione + boss ogni 5 (5 tipi, 3 fasi) + eventi casuali ----------
+  const spawn = () => {
+    wave++; bn = 100; wt = 0; ev = null; msg = ''; pf = 1;
+    P.forEach((q, i) => { // chi era a terra torna in gioco con 1 vita; la disposizione in fila vale solo alla prima ondata e per i rianimati
+      const reset = wave === 1 || !q.alive;
+      if (!q.alive) { q.alive = 1; q.lv = 1; q.cmb = 0; q.inv = 120; q.dg = 0; q.ds = 0; }
+      if (reset) { q.x = q.px = 74 + (i - (P.length - 1) / 2) * 34; q.y = 212; q.vx = q.vy = 0; }
+      if (q.as) q.sh = Math.max(q.sh, 120 + q.as * 90);
+    });
+    const pt = wave % 6;
+    if (wave % 5 === 0) {
+      const n = wave / 5 | 0, bt = (n - 1) % 5, c = (n - 1) / 5 | 0, g = SZ['B' + bt], hp = Math.round((60 + wave * 14 + wave * wave * .35 + upAvg() * 8 + c * 40) * tf());
+      es.push({ k: 'B', bt, x: (W - g[0]) / 2, y: -g[1] - 10, w: g[0], h: g[1], hp, m: hp, tk: 0, ph: 0, iv: 0, th: 0, bs: 0, bc: 0, rs: 0, rc: 120, pc: 0 });
+      for (let i = 0; i < 6; i++) add('e', 16 + i * 22, -20);
+      if (c) for (let i = 0; i < 4; i++) add('k', 26 + i * 32, -36);
+      msg = BN[bt];
+      return;
+    }
+    if (pt === 1) { // V
+      for (let r = 0; r < Math.min(1 + (wave / 6 | 0), 4); r++)
+        for (let i = 0; i < 9; i++) add(kind(), 74 + (i - 4) * 16, -70 + (4 - Math.abs(i - 4)) * 10 - r * 30, 0, 8);
+    } else if (pt === 2) { // serpente
+      for (let i = 0; i < 10 + Math.min(wave >> 2, 8); i++) add(kind(), 74, -20 - i * 12, i * .6, 60);
+    } else if (pt === 3) { // muro
+      for (let r = 0; r < 2 + (wave / 15 | 0); r++) for (let c = 0; c < 7; c++) add(c % 3 === 0 && wave > 2 ? 'k' : 'e', 12 + c * 20, -40 + r * 16, r);
+    } else if (pt === 4) { // diamante
+      for (let r = 0; r < 7; r++) { const n = r < 4 ? r + 1 : 7 - r; for (let i = 0; i < n; i++) add(kind(), 74 + (i - (n - 1) / 2) * 16, -90 + r * 13, r * .5, 6); }
+    } else if (pt === 5) { // pinza: due colonne sui lati
+      for (let r = 0; r < 5; r++) { add(kind(), 14, -20 - r * 16, r * .5, 10); add(kind(), W - 25, -20 - r * 16, r * .5 + 3.14, 10); }
+      add(wave >= 6 ? 't' : 'k', 74, -40, 0, 0);
+    } else { // griglia
+      for (let r = 0; r < Math.min(2 + (wave >> 1), 7); r++)
+        for (let c = 0; c < 6; c++) add(kind(), 16 + c * 22, -60 + r * 18, r);
+    }
+    if (wave >= 5 && wave % 2 === 1) add('l', 70, -20, Math.random() * 6); // posamine nelle ondate dispari
+    const rf = Math.min(((dif() - 8) / 6) | 0, 4); // rinforzi: file extra che arrivano dopo la formazione, in numero crescente
+    for (let r = 0; r < rf; r++) for (let c = 0; c < 6; c++) add(kind(), 16 + c * 22 + (r % 2) * 9, -120 - r * 20, r * .7, 8);
+    mx = Math.max(mx, dif());
+    if (wave >= 2 && Math.random() < Math.min(.5 + wave * .01, .75)) {
+      const k = Math.random() * 4 | 0;
+      ev = { k, t: 0 }; msg = ['PIOGGIA DI METEORE', 'SCIAME KAMIKAZE', 'UFO BONUS!', 'ATTACCO CACCIA'][k];
+    }
+  };
+  const resetWorld = () => { sc = 0; wave = 0; nl = 2000; pz = 0; ks = 0; mc = 0; pf = 1; ev = null; msg = ''; rk = 0; mx = 0; bs = []; es = []; eb = []; ps = []; us = []; fx = []; rg = []; };
+  const start = () => { // avvia (o riavvia) la partita con i giocatori presenti
+    if (!net) { P = [newP(0, { local: 1 })]; ME = 0; }
+    resetWorld(); P.forEach(resetP); p = P[ME]; st = 1; spawn();
+  };
+  const boom = (bx, by, col, n = 10) => {
+    if (net && net.role === 'host') evq.push(['b', r1(bx), r1(by), col, n]);
+    const cs = [col, '#fd3', '#fff', '#f84'];
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * 6.28, v = Math.random() * 1.8 + .4;
+      ps.push({ x: bx, y: by, vx: Math.cos(a) * v, vy: Math.sin(a) * v, l: 18 + Math.random() * 14, c: cs[Math.random() * 4 | 0], s: Math.random() < .25 ? 2 : 1 });
+    }
+  };
+  const hit = () => {
+    if (p.inv > 0 || p.dg > 0) return;
+    if (p.sh > 0) { p.sh = 0; p.inv = 40; snd(300, .1); ring(p.x + 5, p.y + 7, '#3cf', 14); return; }
+    rk = Math.max(0, rk - 1.5); p.lv--; p.inv = 70 + p.iv * 30; p.w = Math.max(p.wm, p.w - 1); shake = 10; p.cmb = 0; pf = 0;
+    boom(p.x + 5, p.y + 7, '#3cf', 16); snd(120, .3, 'sawtooth', -80);
+    if (p.local) try { globalThis.navigator && navigator.vibrate && navigator.vibrate(40); } catch (e) {}
+    if (p.lv <= 0) {
+      p.alive = 0; pop(p.x + 5, p.y - 8, P.length > 1 ? p.name + ' A TERRA' : 'KO', '#f44');
+      if (!P.some(q => q.alive)) { // game over solo quando cadono tutti
+        st = 2; ov = 60; nr = 0;
+        if (sc > hi) { hi = sc; nr = 1; try { localStorage.hi = hi; } catch (e) {} }
+      }
+    }
+  };
+  const burst = e => { // la mina esplode in un anello di proiettili
+    const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
+    for (let i = 0; i < 8; i++) { const a = i * .785 + .39; sb(cx, cy, Math.cos(a) * 1.2, Math.sin(a) * 1.2); }
+    ring(cx, cy, '#f84', 14); snd(150, .15);
+  };
+  const kill = e => {
+    e.d = 1; p.cmb++; mc = Math.max(mc, p.cmb); ks++; p.ct = 100 + p.cb * 50;
+    const pts = e.k === 'B' ? 300 + wave * 10 : e.k === 'a' ? (e.big ? 15 : 5) : ET[e.k][3], v = pts * mult();
+    sc += v;
+    if (v >= 30) pop(e.x + e.w / 2, e.y, '+' + v, mult() > 1 ? '#fd3' : '#fff');
+    if (sc >= nl) { P.forEach(q => { if (q.alive) q.od = dur(TM.od, q); }); nl += 2500 + wave * 100; snd(900, .2); pop(W / 2, 90, 'SOVRACCARICO!', '#f8c'); }
+    const cx = e.x + e.w / 2, cy = e.y + e.h / 2;
+    boom(cx, cy, COL[e.k], e.k === 'B' ? 50 : 12);
+    if (e.k === 'B') {
+      shake = 25; ring(cx, cy, '#c6f', 40); ring(cx, cy, '#fff', 28); eb = [];
+      for (let i = 0; i < 2; i++) us.push({ x: cx - 4.5 + (i ? 14 : -14), y: e.y + e.h / 2, k: pk() });
+    }
+    if (e.k === 't') ring(cx, cy, '#889', 16);
+    if (e.k === 'a' && e.big) { rock(0, e.x, e.y, -.7); rock(0, e.x + 9, e.y, .7); }
+    if (e.k === 'x') [-1, 1].forEach(s => mk('n', { x: e.x + 3, y: e.y, vx: s * 1.1, vy: 1.3 }));
+    if (e.k === 'm' || e.af === 1) burst(e);
+    snd(220, .1);
+    if (e.k !== 'n' && e.k !== 'm' && e.k !== 'q' && (e.k === 'B' || e.k === 'o' || Math.random() < Math.max(.03, .09 - wave * .0015) + p.lk * .04)) us.push({ x: cx - 4.5, y: e.y, k: pk() });
+  };
+  const bomb = () => {
+    if (st !== 1 || pz || p.bm < 1) return;
+    p.bm--; fl = 12; shake = 20; snd(80, .4, 'sawtooth', -40); ring(p.x + 5, p.y + 7, '#fff', 40);
+    es.slice().forEach(e => {
+      if (e.k === 'B' && (e.iv > 0 || e.pc > 0)) return; // il boss con scudo/invulnerabile ignora la bomba
+      e.hp -= e.k === 'B' ? 15 : 5; e.f = 4;
+      if (e.hp <= 0 && !e.d) kill(e);
+    });
+    es = es.filter(e => !e.d);
+    eb = []; // dopo le uccisioni: cancella anche gli anelli delle mine esplose
+  };
+  // Scatto: lo avvia stepMove (condiviso); qui gli effetti (suono e, con SCATTO ONDA, cancella i proiettili vicini)
+  const dash = () => { want.dash = 1; };
+  const bombReq = () => { want.bomb = 1; };
+  const dashFx = q => {
+    snd(500, .12, 'sawtooth', 400);
+    if (q.dw) {
+      const cx = q.x + 5, cy = q.y + 7;
+      eb = eb.filter(b => { const keep = Math.hypot(b.x + 2.5 - cx, b.y + 2.5 - cy) > 36; if (!keep) sc += 3 * mult(); return keep; });
+      ring(cx, cy, '#8ef', 16);
+    }
+  };
+
+  // ---------- Spari nemici ----------
+  const eshoot = e => {
+    const d = dif(), sp = Math.min(1.5 + d * .05, 4.2), cx = e.x + e.w / 2, cy = e.y + e.h - 1;
+    if (e.k === 't') { const n = d > 18 ? 5 : 3; for (let i = 0; i < n; i++) sb(cx, cy, (i - (n - 1) / 2) * .45, sp * .8); return; }
+    if (e.k === 'k' && d > 14) { const a0 = Math.atan2(p.y + 7 - cy, p.x + 5 - cx), n = d > 28 ? 3 : 2; for (let i = 0; i < n; i++) { const a = a0 + (i - (n - 1) / 2) * .22; sb(cx, cy, Math.cos(a) * sp * .85, Math.sin(a) * sp * .85); } return; }
+    if (e.k === 'e' && d > 24 && Math.random() < .5) { sb(cx - 3, cy, 0, sp); sb(cx + 3, cy, 0, sp); return; }
+    sb(cx, cy, e.k === 'k' ? cl((p.x + 5 - cx) / 70, -.7, .7) : 0, sp);
+  };
+
+  // ---------- Boss: 5 tipi x 3 fasi (cambio fase a 66% e 33% di vita, con breve invulnerabilita') ----------
+  const bossUpd = e => {
+    const bt = e.bt, c = (wave / 5 - 1) / 5 | 0;
+    if (e.y < 22) { e.y = Math.min(22, e.y + .8); return; } // entrata in scena
+    e.tk++;
+    if (e.iv > 0) e.iv--;
+    const pc = e.pc = es.reduce((n, q) => n + (q.k === 'q' && q.par === e && !q.d ? 1 : 0), 0);
+    const ph = e.hp > e.m * .66 ? 0 : e.hp > e.m * .33 ? 1 : 2;
+    const rtNow = () => 1 + Math.min(Math.max(0, dif() - 5) / 35, 1); // 1 -> 2: gli intervalli di attacco si dimezzano al crescere della minaccia
+    const rt = e.rt || (e.rt = rtNow()); // congelato per fase: se la minaccia cambia a meta' scontro (es. dopo un colpo) i tempi non si sfasano
+    const bx = e.x + e.w / 2, by = e.y + e.h - 3, sp = Math.min(1.5 + dif() * .04, 3.4) * (1 + c * .08);
+    const T1 = { t: 1 };
+    const sh = (a, s = sp) => sb(bx, by, Math.cos(a) * s, Math.sin(a) * s, T1);
+    const aim = Math.atan2(p.y + 7 - by, p.x + 5 - bx);
+    const fan = (n, sp2, s) => { for (let i = 0; i < n; i++) sh(aim + (i - (n - 1) / 2) * sp2, s); };
+    const rng = (n, off, s) => { for (let i = 0; i < n; i++) sh(off + i * 6.283 / n, s); };
+    const gx = () => cl(p.x + 5 + (Math.random() - .5) * 90, 16, W - 16);
+    const curtain = (gaps, gw) => {
+      if (e.lc !== undefined && k - e.lc < 60) return; // mai due tende a meno di 1 secondo l'una dall'altra
+      if (e.lc !== undefined && k - e.lc < 150) { const dg = gaps[0] - e.lg, sh = cl(dg, -30, 30) - dg; gaps = gaps.map(g => cl(g + sh, 12, W - 12)); } // varco raggiungibile dal precedente
+      e.lc = k; e.lg = gaps[0];
+      for (let cx = 4; cx < W; cx += 9) if (!gaps.some(g => Math.abs(cx - g) < gw)) sb(cx, by + 2, 0, 1.2 + wave * .015, T1);
+    };
+    if (ph === 2 && t % 5 === 0) ps.push({ x: e.x + Math.random() * e.w, y: e.y + Math.random() * e.h, vx: Math.random() - .5, vy: -.3, l: 14, c: Math.random() < .5 ? '#f84' : '#888' });
+    if (ph > e.ph) { // cambio fase: pulizia proiettili, invulnerabilita', rinforzi
+      e.ph = ph; e.iv = 80; e.tk = 0; e.rt = rtNow(); e.lc = undefined; eb = []; shake = 15; ring(bx, e.y + e.h / 2, '#f44', 40); pop(W / 2, 70, 'FASE ' + (ph + 1), '#f44'); snd(90, .5, 'sawtooth', -50);
+      if (bt === 0) for (let i = 0; i < 4; i++) add('e', 30 + i * 32, -10);
+      if (bt === 1) launch(e, 3);
+      if (bt === 2) e.bs = 0;
+      if (bt === 3) pods(e, 3 + ph + c + (rt > 1.5 ? 1 : 0));
+      if (bt === 4) { e.rs = e.rs ? 3 : 0; e.rc = 60; }
+      return;
+    }
+    if (bt === 3 && !e.pi) { e.pi = 1; pods(e, 3 + c + (rt > 1.5 ? 1 : 0)); }
+    // movimento (la regina in affondo e l'occhio durante il raggio restano bloccati)
+    const lock = (bt === 2 && e.bs > 0) || (bt === 4 && e.rs > 0), A = (W - e.w) / 2 - 6;
+    if (bt === 4 && e.rs === 3) {
+      e.y -= 2.5;
+      if (e.y <= 22) {
+        e.y = 22; e.th = Math.asin(cl((e.x - (W - e.w) / 2) / A, -1, 1)); e.rs = 0;
+        if (ph === 2 && !e.dbl) { e.dbl = 1; e.rc = 18; } else { e.dbl = 0; e.rc = Math.round([200, 150, 110][ph] / rt); } // fase 3: doppio affondo
+      }
+    } else if (!lock) { e.th += [.02, .014, .02, .016, .018][bt] * (1 + ph * .12); e.x = (W - e.w) / 2 + Math.sin(e.th) * A; }
+    if (e.iv > 0) return;
+    const k = e.tk, at = (n, o = 0) => { const q = Math.max(6, Math.round(n / rt)); return k % q === o % q; };
+    if (rt > 1.4 && at(70, 35)) fan(3, .26); // alta minaccia: raffica mirata extra
+    if (bt === 0) { // CORAZZATA: ventagli, tende di proiettili con varco, spirale
+      if (ph === 0) { if (at(40)) fan(3, .22); if (at(150, 100)) curtain([gx()], 11); }
+      else if (ph === 1) { if (at(28)) fan(5, .2); if (at(110, 80)) curtain([gx()], 11); if (at(220, 150)) { zed(e.x + 6); zed(e.x + e.w - 12); } }
+      else { if (at(6)) { const a = k * .12; sh(a, 1.3); sh(a + 3.14, 1.3); } if (at(22)) fan(3, .25); if (at(90, 60)) { const g = gx(); curtain([g - 38, g + 38], 10); } }
+    } else if (bt === 1) { // PORTAEREI: cannoni, droni, campo minato, kamikaze
+      if (at(ph ? 24 : 32)) { sb(e.x + 5, by, -.2, sp, T1); sb(e.x + e.w - 5, by, .2, sp, T1); if (ph === 2) fan(3, .3); }
+      if (at([260, 200, 150][ph])) launch(e, 2 + ph + (rt > 1.5 ? 1 : 0));
+      if (ph >= 1 && at(170, 90)) { const o = Math.random() * 30; for (let i = 0; i < 4; i++) mk('m', { x: 12 + o + i * 36, y: by, fz: 150 }); }
+      if (ph === 2 && at(120, 60)) { zed(e.x + 6); zed(e.x + e.w - 12); }
+    } else if (bt === 2) { // OCCHIO: anelli + raggi orbitali (1 raggio, 2 raggi, 2 raggi a spazzata)
+      e.bc++;
+      if (e.bs === 0) {
+        if (e.bc % Math.max(8, Math.round([30, 26, 20][ph] / rt)) === 0) rng(6 + ph * 2, e.bc * .05, 1.2 + ph * .15 + c * .1);
+        if (ph >= 1 && e.bc % 70 === 35) fan(3, .3);
+        if (e.bc > Math.round([170, 130, 100][ph] / rt)) {
+          e.bs = 1; e.bc = 0; const q = p.x + 5, bw = 8 + Math.round((rt - 1) * 4), bm = (bx2, v) => ({ x: bx2, v, w: bw });
+          e.bm = ph === 0 ? [bm(q, 0)] : ph === 1 ? [bm(q, 0), bm(W - q, 0)] : [bm(cl(q - 55, 8, W - 8), 2.2), bm(cl(q + 55, 8, W - 8), -2.2)];
+          if (rt > 1.6) e.bm.push(bm(ph === 1 ? cl(q + 50, 8, W - 8) : q, 0));
+          snd(200, .5, 'sawtooth', 200);
+        }
+      } else if (e.bs === 1) { if (e.bc > 50) { e.bs = 2; e.bc = 0; snd(120, .4, 'sawtooth', -60); shake = 12; } }
+      else { e.bm.forEach(b => { b.x = cl(b.x + b.v, 4, W - 4); }); if (e.bc > 38) { e.bs = 0; e.bc = 0; } }
+    } else if (bt === 3) { // NUCLEO: satelliti orbitanti che lo proteggono; scoperto, attacca furioso e poi rigenera lo scudo
+      if (pc > 0) { e.ex = 0; if (at(80)) rng(8, k * .03, 1.1); }
+      else {
+        e.ex = (e.ex || 0) + 1;
+        if (e.ex % Math.max(8, Math.round(24 / rt)) === 0) fan(5, .2);
+        if (e.ex % 6 === 0) sh(e.ex * .15, 1.2);
+        if (e.ex % 140 === 100) curtain([gx()], 11);
+        if (e.ex > Math.round(420 / rt)) { pods(e, 2 + ph); e.ex = 0; pop(W / 2, 60, 'SCUDO!', '#6ff'); }
+      }
+    } else { // REGINA: affondi telegrafati (doppi in fase 3), sciami e splitter
+      if (e.rs === 0) {
+        if (at([45, 35, 30][ph])) fan(ph ? 5 : 3, .2);
+        if (at([300, 240, 200][ph], 150)) [4, e.w - 15].forEach(o => mk('x', { tr: 1, x: e.x + o, y: e.y + e.h, ox: e.x + o, ph: 0, amp: 0, am0: 0, cd: 99 }));
+        if (ph >= 1 && at(200, 100)) zed(e.x + e.w / 2 - 3);
+        if (--e.rc <= 0) { e.rs = 1; e.rc = 0; e.lx = cl(p.x + 5 - e.w / 2, 0, W - e.w); snd(180, .5, 'sawtooth', 300); }
+      } else if (e.rs === 1) { // telegrafo: si allinea sul bersaglio
+        e.x += cl(e.lx - e.x, -3, 3);
+        if (++e.rc > 50) { e.rs = 2; e.rc = 0; shake = 6; snd(100, .3, 'sawtooth', 200); }
+      } else if (e.rs === 2) { // affondo
+        e.y += 6.5 + c * .5 + (rt - 1) * 1.5;
+        if (ph >= 1 && k % 3 === 0) { sb(e.x + 3, e.y + e.h / 2, -1.2, .4, T1); sb(e.x + e.w - 3, e.y + e.h / 2, 1.2, .4, T1); }
+        if (e.y > H - e.h - 22) e.rs = 3;
+      }
+    }
+  };
+
+  // ---------- Aggiornamento ----------
+  const fxStep = () => { // parte "cosmetica" (stelle, particelle, tremolio): identica su host, solo e client
+    t++;
+    stars.forEach(s => { s[1] += s[2]; if (s[1] > H) { s[1] = 0; s[0] = Math.random() * 480; } });
+    pl.y += .06;
+    if (pl.y > H + 40) { pl.y = -40; pl.x = Math.random(); pl.r = 12 + (Math.random() * 14 | 0); pl.i = Math.random() * 4 | 0; }
+    neb.forEach(n => { n.y += n.v; if (n.y > H + 50) { n.y = -50; n.x = Math.random(); } });
+    ps.forEach(q => { q.x += q.vx; q.y += q.vy; q.l--; });
+    ps = ps.filter(q => q.l > 0);
+    fx.forEach(f => { f.y -= .3; f.l--; }); fx = fx.filter(f => f.l > 0);
+    rg.forEach(r => { r.r += 2.2; r.l--; }); rg = rg.filter(r => r.l > 0);
+    P.forEach(q => { q.gh.forEach(g => g.l--); q.gh = q.gh.filter(g => g.l > 0); });
+    if (shake > 0) shake--;
+    if (fl > 0) fl--;
+    if (ov > 0) ov--;
+  };
+  // passo di un giocatore (p === q): movimento, timer, droni, sparo, bomba, missili
+  const playerStep = (q, b) => {
+    stepMove(q, b);
+    if (q.dst) { q.dst = 0; dashFx(q); }
+    if (q.ds > 0) q.gh.push({ x: q.x, y: q.y, l: 14 });
+    q.cd--; q.inv--;
+    ['sh', 'rf', 'dt', 'ls', 'sl', 'od', 'ab'].forEach(k => { if (q[k] > 0) q[k]--; });
+    if (q.ct > 0 && --q.ct === 0) q.cmb = 0;
+    if (t % 3 === 0) ps.push({ x: q.x + 5, y: q.y + 13, vx: (Math.random() - .5) * .3, vy: 1 + Math.random(), l: 9, c: Math.random() < .5 ? '#f84' : '#fd3' });
+    // droni alleati (2 max)
+    const nd0 = Math.min(2, q.dn + (q.dt > 0 ? 2 : 0));
+    while (q.dro.length < nd0) q.dro.push({ x: q.x, y: q.y });
+    while (q.dro.length > nd0) q.dro.pop();
+    q.dro.forEach((d, i) => { const off = nd0 === 1 ? 16 : i ? 16 : -16; d.x += (q.x + 5 + off - 3.5 - d.x) * .2; d.y += (q.y + 6 - d.y) * .2; });
+    if (b.bomb) bomb();
+    // sparo (arma 1-3; in mira precisa il triplo colpo e' parallelo) + droni + missili a ricerca
+    if (b.fire && q.cd <= 0) {
+      const pr = q.ls > 0 ? 1 : 0, dm = q.dm + pr + (q.od > 0 ? 1 : 0) + (q.fd && q.fc ? 1 : 0), cx = q.x + 4, s3 = q.fc ? 0 : .8;
+      const mkb = (dx, vx) => bs.push({ x: cx + dx, y: q.y, vx, vy: -4, dm, pr, hs: [], o: q });
+      if (q.w === 1) mkb(0, 0);
+      else if (q.w === 2) { mkb(-3, 0); mkb(3, 0); }
+      else { mkb(0, 0); mkb(-4, -s3); mkb(4, s3); }
+      q.dro.forEach(d => bs.push({ x: d.x + 2, y: d.y, vx: 0, vy: -4, dm: 1 + pr, pr, hs: [], o: q }));
+      q.cd = q.rf > 0 || q.od > 0 ? Math.max(3, (11 - q.fr) * .46 | 0) : 11 - q.fr;
+      snd(pr ? 900 : 700, .04);
+    }
+    if (q.hm > 0) q.hm--;
+    if ((q.hm > 0 || q.mp) && t % (q.hm > 0 ? 30 : 70) === 0) {
+      [-1, 1].forEach(v => bs.push({ x: q.x + 4 + v * 4, y: q.y + 2, vx: v, vy: -2, h: 1, dm: q.dm, o: q }));
+    }
+  };
+  // scelta dei potenziamenti: contemporanea per tutti; chi non sceglie entro 15 s (in cooperativa) riceve un'opzione a caso
+  const pickStep = () => {
+    if (--pickT > 0 && !P.every(q => q.pk >= 0)) return;
+    P.forEach(q => {
+      p = q; let i = q.pk;
+      if (i < 0 || q.ch[i] === undefined) i = q.ch.length ? Math.random() * q.ch.length | 0 : -1;
+      if (i >= 0) { UP[q.ch[i]][2](); q.up++; }
+    });
+    p = P[ME] || P[0]; st = 1; spawn(); snd(800, .15);
+  };
+  const upd = () => {
+    if (pz) return;
+    if (st === 3) pickStep(); // la scelta si risolve per prima e il tick prosegue subito (come quando era immediata)
+    fxStep();
+    P.forEach(q => { q.inp = nextInput(q); }); // (non chiamarlo "fr": e' il livello di cadenza di fuoco)
+    if (st !== 1) return;
+    if (bn > 0) bn--;
+    P.forEach(q => { if (q.alive) { p = q; playerStep(q, q.inp); } });
+
+    bs.forEach(b => {
+      if (b.h) {
+        let n = null, d = 1e9;
+        es.forEach(e => { const q = (e.x - b.x) ** 2 + (e.y - b.y) ** 2; if (q < d) { d = q; n = e; } });
+        if (n) {
+          const a = Math.atan2(n.y + n.h / 2 - b.y, n.x + n.w / 2 - b.x);
+          b.vx += Math.cos(a) * .3; b.vy += Math.sin(a) * .3;
+          const s = Math.hypot(b.vx, b.vy);
+          if (s > 3.5) { b.vx *= 3.5 / s; b.vy *= 3.5 / s; }
+        }
+      }
+      b.x += b.vx; b.y += b.vy;
+    });
+    bs = bs.filter(b => b.y > -8 && b.y < H && b.x > -3 && b.x < W);
+
+    // asteroidi casuali dalla terza ondata
+    if (wave >= 3 && Math.random() < .002 + wave * .0003) rock(1, Math.random() * (W - 18), -18, (Math.random() - .5) * .6);
+
+    // eventi di ondata
+    if (ev) {
+      ev.t++;
+      if (ev.k === 0 && ev.t < 600 && Math.random() < .035 + dif() * .0008) rock(Math.random() < .35, Math.random() * (W - 18), -18, (Math.random() - .5) * .9);
+      if (ev.k === 1 && ev.t < 320 + dif() * 4 && ev.t % Math.max(24, 55 - (dif() | 0)) === 20) zed(Math.random() * (W - 7));
+      if (ev.k === 2 && ev.t === 60) ufo();
+      if (ev.k === 3 && ev.t < 260 + dif() * 4 && ev.t % Math.max(26, 52 - (dif() | 0)) === 20) fgt((ev.n = (ev.n || 0) + 1) % 2 ? -1 : 1);
+    }
+
+    // nemici: movimento, tuffi telegrafati, spari (il "tempo lento" li rallenta a meta')
+    const sk = P.some(q => q.alive && q.sl > 0) && (t & 1); // il tempo lento di uno rallenta il mondo per tutti
+    let nd = es.filter(e => e.dv || e.tel > 0).length;
+    const DF = dif();
+    if (!sk) es.forEach(e => {
+      p = tgt(e); // i nemici lavorano sul giocatore vivo piu' vicino
+      const k = e.k;
+      if (k === 'a') { e.x += e.vx; e.y += e.vy; if (e.x < -20 || e.x > W) e.d = 1; return; }
+      if (k === 'z') { // kamikaze: sterza verso il giocatore finche' non lo supera, poi va dritto
+        if (e.y < p.y - 16) { let d = Math.atan2(p.y + 7 - e.y, p.x + 5 - e.x - 3) - e.a; d = Math.atan2(Math.sin(d), Math.cos(d)); e.a += cl(d, -.035, .035); }
+        e.x += Math.cos(e.a) * e.sp; e.y += Math.sin(e.a) * e.sp;
+        if (e.y > H + 10 || e.x < -20 || e.x > W + 12) e.d = 1;
+        return;
+      }
+      if (k === 'n') { e.x += e.vx; e.y += e.vy; if (e.x < 0 || e.x > W - 5) { e.vx *= -1; e.x = cl(e.x, 0, W - 5); } return; }
+      if (k === 'm') { e.y += .5; if (--e.fz <= 0) { e.d = 1; burst(e); } return; }
+      if (k === 'o') {
+        e.x += e.vx; e.y = 22 + Math.sin(t / 20) * 4;
+        if (Math.random() < .008) sb(e.x + e.w / 2, e.y + e.h, 0, 1.4);
+        if (e.vx > 0 ? e.x > W + 4 : e.x < -18) e.d = 1;
+        return;
+      }
+      if (k === 'f') { // caccia: attraversa lo schermo sparando colpi mirati
+        e.x += e.vx; e.y += .25;
+        if (--e.cd <= 0) { e.cd = 38; const cx = e.x + e.w / 2, cy = e.y + e.h, a = Math.atan2(p.y + 7 - cy, p.x + 5 - cx); sb(cx, cy, Math.cos(a) * 2.1, Math.sin(a) * 2.1); }
+        if (e.vx > 0 ? e.x > W + 4 : e.x < -16) e.d = 1;
+        return;
+      }
+      if (k === 'q') { // satellite del nucleo: orbita attorno al boss e spara
+        const B = e.par;
+        if (B.d) { e.d = 1; return; }
+        e.ang += .025 + B.ph * .01;
+        e.x = B.x + B.w / 2 + Math.cos(e.ang) * 32 - e.w / 2; e.y = B.y + B.h / 2 + Math.sin(e.ang) * 22 - e.h / 2;
+        if (--e.cd <= 0) { e.cd = 120 - B.ph * 20; const cx = e.x + 4.5, cy = e.y + 4.5, a = Math.atan2(p.y + 7 - cy, p.x + 5 - cx); sb(cx, cy, Math.cos(a) * 1.8, Math.sin(a) * 1.8, { t: 1 }); }
+        return;
+      }
+      if (k === 'l') { // posamine: oscilla in alto e semina mine
+        e.x = 75 + Math.sin(t / 50 + e.ph) * 62; if (e.y < 14) e.y += .6;
+        if (e.y > 4 && --e.cd <= 0) { e.cd = Math.max(70, 130 - wave * 3); mk('m', { x: e.x + 3, y: e.y + 7, fz: 170 }); }
+        return;
+      }
+      if (k === 'B') { bossUpd(e); return; }
+      // formazione: avviso lampeggiante (0.67s) e poi picchiata
+      if (!e.dv && !e.tel && nd < Math.min(2 + (DF / 5 | 0), 7) && 'ekx'.includes(k) && wave >= 2 && e.y > 0 && e.y < 130 && Math.random() < .0009 * Math.min(DF, 45) * (e.af === 2 ? 2 : 1)) { e.tel = Math.max(26, 40 - (DF / 2 | 0)); nd++; snd(500, .1); }
+      if (e.tel > 0 && --e.tel === 0) dive(e);
+      if (e.dv) { e.ox += e.vx; e.y += e.vy; }
+      else e.y += (e.esc ? .6 : Math.min(.15 + DF * .02, .55)) * (e.af === 2 ? 1.3 : 1);
+      e.x = cl(e.ox + Math.sin(t / 30 + e.ph) * e.amp, 0, W - e.w);
+      const rate = (k === 'k' ? Math.min(.004 + DF * .0006, .03) : k === 't' ? .005 + DF * .0002 : k === 's' ? 0 : wave >= 2 ? Math.min(.0015 * (DF - 1), .02) : 0) * (e.af === 2 ? 1.6 : 1);
+      if (e.y > 4 && !e.tel && Math.random() < rate) eshoot(e);
+      if (k === 's' && e.y > 4 && !e.dv) { // cecchino: mirino rosso, poi colpo veloce
+        if (e.ch > 0) {
+          if (--e.ch === 0) { const cx = e.x + e.w / 2, cy = e.y + e.h, a = Math.atan2(p.y + 7 - cy, p.x + 5 - cx); sb(cx, cy, Math.cos(a) * 3, Math.sin(a) * 3, { t: 1 }); if (DF > 20) sb(cx, cy, Math.cos(a + .12) * 3, Math.sin(a + .12) * 3, { t: 1 }); snd(900, .08, 'square', -400); }
+        } else if (Math.random() < .007 + DF * .0002) { e.ch = 34; snd(600, .15); }
+      }
+    });
+    es = es.filter(e => !e.d);
+    if (!sk) eb.forEach(b => { b.x += b.vx; b.y += b.vy; });
+    eb = eb.filter(b => b.y < H && b.y > -8 && b.x > -8 && b.x < W + 3);
+
+    // proiettili vs nemici (laser perforante: una volta sola per nemico; boss protetto da scudo/invulnerabilita')
+    bs.forEach(b => { p = b.o || P[0]; es.forEach(e => {
+      if (e.d || b.d || !ov2(b, 3, b.pr ? 8 : 6, e, e.w, e.h)) return;
+      if (b.pr) { if (b.hs.includes(e)) return; b.hs.push(e); } else b.d = 1;
+      if (e.k === 'B' && (e.iv > 0 || e.pc > 0)) { ps.push({ x: b.x + 1, y: b.y, vx: (Math.random() - .5) * 2, vy: 1, l: 8, c: '#6ff' }); return; }
+      e.hp -= b.dm; e.f = 4;
+      if (e.k === 'B') ps.push({ x: b.x + 1, y: b.y, vx: (Math.random() - .5) * 2, vy: Math.random(), l: 8, c: '#fd3' });
+      if (e.hp <= 0) kill(e); else snd(400, .03);
+    }); });
+    bs = bs.filter(b => !b.d);
+
+    // nemici vs giocatori (lo scatto sperona: 3 danni ogni 12 frame) / raggi orbitali dell'occhio
+    P.forEach(q => {
+      if (!q.alive) return;
+      p = q; const h0 = hbx();
+      es.forEach(e => {
+        if (e.d) return;
+        if (ov2(h0, 5, 5, e, e.w, e.h)) {
+          if (p.dg > 0 && e.k !== 'B') {
+            if (!e.rt || t - e.rt > 12) { e.rt = t; e.hp -= 3; e.f = 4; if (e.hp <= 0) kill(e); }
+          } else {
+            if (e.k !== 'B') { e.d = 1; boom(e.x + e.w / 2, e.y + e.h / 2, COL[e.k], 6); if (e.k === 'm') burst(e); }
+            hit();
+          }
+        } else if (e.k === 'B' && e.bt === 2 && e.bs === 2 && e.bm.some(b => ov2({ x: b.x - b.w / 2, y: 14 }, b.w, H - 14, h0, 5, 5))) hit();
+      });
+    });
+    // uscita dal fondo: nessuna vita persa, il nemico rientra dall'alto
+    es.forEach(e => {
+      if (e.d || e.y <= H) return;
+      if (e.k === 'a' || trn(e)) e.d = 1;
+      else {
+        if (!e.dv) { P.forEach(q => { q.cmb = 0; }); pop(e.x + 5, H - 20, 'FUGGITO!', '#f44'); } // solo chi sfugge dalla formazione azzera la combo
+        e.y = -14; e.dv = 0; e.tel = 0; e.esc = 1; e.amp = e.am0; e.ox = cl(e.ox, 8, W - 19);
+      }
+    });
+    es = es.filter(e => !e.d);
+
+    // proiettili nemici vs giocatori: assorbi / colpo / sfioramento (40 sfioramenti = bomba)
+    P.forEach(q => {
+      if (!q.alive) return;
+      p = q; const h0 = hbx(), pcx = p.x + 5, pcy = p.y + 7;
+      eb.forEach(b => {
+        if (b.d) return;
+        const bcx = b.x + 2.5, bcy = b.y + 2.5;
+        if (p.ab > 0 && Math.hypot(bcx - pcx, bcy - pcy) < 17) { b.d = 1; sc += 3 * mult(); ps.push({ x: bcx, y: bcy, vx: 0, vy: -.4, l: 8, c: '#6f8' }); return; }
+        if (ov2({ x: b.x + 1, y: b.y + 1 }, 3, 3, h0, 5, 5)) { b.d = 1; hit(); }
+        else if (!b.g && (p.inv <= 0 || p.dg > 0) && Math.abs(bcx - pcx) < 9 && Math.abs(bcy - pcy) < 10) {
+          b.g = 1; sc += 2 * mult(); ps.push({ x: bcx, y: bcy, vx: 0, vy: -.5, l: 8, c: '#fff' });
+          if (++p.gr >= 40) { p.gr = 0; p.bm = Math.min(p.bm + 1, 6); pop(p.x + 5, p.y - 8, 'BOMBA!', '#f84'); snd(1200, .15); }
+        }
+      });
+    });
+    eb = eb.filter(b => !b.d);
+
+    // power-up (con magnete): il primo che li tocca li prende
+    us.forEach(u => { u.y += 1; });
+    P.forEach(q => {
+      if (!q.alive) return;
+      p = q; const pcx = p.x + 5, pcy = p.y + 7;
+      us.forEach(u => {
+        if (u.d) return;
+        if (p.mg) {
+          const dx = pcx - u.x - 4.5, dy = pcy - u.y - 4.5, d = Math.hypot(dx, dy) || 1;
+          if (d < 30 + p.mg * 25) { u.x += dx / d * 1.5; u.y += dy / d * 1.5; }
+        }
+        if (ov2(u, 9, 9, p, 11, 13)) {
+          u.d = 1; snd(1000, .15); pop(p.x + 5, p.y - 6, UN[u.k], UC[u.k]);
+          if (u.k === 0) p.w = Math.min(p.w + 1, 3);
+          else if (u.k === 1) p.sh = dur(TM.sh);
+          else if (u.k === 2) p.rf = dur(TM.rf);
+          else if (u.k === 3) p.bm = Math.min(p.bm + 1, 6);
+          else if (u.k === 4) p.hm = dur(TM.hm);
+          else if (u.k === 5) p.dt = dur(TM.dt);
+          else if (u.k === 6) p.ls = dur(TM.ls);
+          else if (u.k === 7) p.sl = dur(TM.sl);
+          else if (u.k === 8) p.od = dur(TM.od);
+          else p.ab = dur(TM.ab);
+        }
+      });
+    });
+    us = us.filter(u => !u.d && u.y < H);
+
+    // fine ondata: bonus (+ "perfetto" senza danni), poi scelta potenziamento ogni 4 ondate e dopo i boss
+    if (st === 1 && !es.some(e => !trn(e))) {
+      if (!wt) {
+        wt = 90; sc += wave * 50;
+        if (pf) { sc += wave * 100; pop(W / 2, 100, 'PERFETTO! +' + wave * 100, '#4e6'); rk = Math.min(rk + 1.5, 12); } else rk = Math.max(0, rk - 1);
+      } else if (--wt === 0) {
+        es = []; eb = [];
+        if (wave % 4 === 0 || wave % 5 === 0) { P.forEach(q => { p = q; q.ch = offer(); q.pk = q.ch.length ? -1 : 0; }); st = 3; pickT = P.length > 1 ? 900 : 1e9; }
+        else spawn();
+      }
+    }
+    p = P[ME] || P[0];
+  };
+
+  // ---------- Disegno (canvas S volte piu' denso: si disegna in coordinate logiche con trasformazione di scala) ----------
+  const sn = v => Math.round(v * S) / S; // aggancia ai pixel reali: movimento fluido senza sfocature
+  const dimg = (im, dx, dy, w, h) => x.drawImage(im, sn(dx), sn(dy), w || im.width / S, h || im.height / S);
+  const txt = (s, px, py, col = '#fff') => { x.fillStyle = col; x.fillText(s, px, py); };
+  // pannelli laterali (visibili solo se la finestra e' piu' larga del campo di gioco): statistiche e potenziamenti attivi
+  const side = () => {
+    if (OX < 40 || st === 0 || !p) return;
+    x.fillStyle = 'rgba(0,0,0,.45)'; x.fillRect(0, 0, OX, H); x.fillRect(OX + W, 0, VW - OX - W, H);
+    x.strokeStyle = 'rgba(80,200,255,.3)'; x.beginPath(); x.moveTo(OX, 0); x.lineTo(OX, H); x.moveTo(OX + W, 0); x.lineTo(OX + W, H); x.stroke();
+    const lab = (s, px, py) => { x.font = '6px monospace'; txt(s, px, py, '#789'); }, val = (s, px, py, c) => { x.font = '11px monospace'; txt(s, px, py, c); };
+    x.textAlign = 'left';
+    const L = 12, R = OX + W + 12;
+    lab('PUNTI', L, 22); val('' + sc, L, 35, '#fff');
+    lab('RECORD', L, 52); val('' + Math.max(hi, sc), L, 65, '#fd3');
+    lab('ONDATA', L, 82); val('' + wave, L, 95, '#3cf');
+    lab('COMBO', L, 112); val('x' + mult() + '  (' + p.cmb + ')', L, 125, '#fd3');
+    lab('MINACCIA', L, 142); val('' + (dif() | 0), L, 155, '#f84');
+    lab('VITE', L, 172); for (let i = 0; i < p.lv; i++) dimg(spr.p, L + i * 14, 177, 11, 13);
+    lab('BOMBE', L, 208); val('' + p.bm, L, 221, '#f84');
+    lab('POTENZIAMENTI ATTIVI', R, 22);
+    let yy = 34;
+    [['SCUDO', 'sh', 1], ['RAPIDO', 'rf', 2], ['MISSILI', 'hm', 4], ['DRONI', 'dt', 5], ['LASER', 'ls', 6], ['TEMPO', 'sl', 7], ['SOVRACCARICO', 'od', 8], ['ASSORBI', 'ab', 9]].forEach(([n, k, c]) => {
+      if (p[k] > 0) { lab(n, R, yy); x.fillStyle = UC[c]; x.fillRect(R, yy + 2, 70 * Math.min(1, p[k] / (TM[k] * (1 + p.du * .4))), 3); yy += 14; }
+    });
+    if (yy === 34) lab('nessuno', R, yy);
+    lab('STATISTICHE', R, 160);
+    [['DANNO', p.dm], ['CADENZA', p.fr], ['ARMA', p.w], ['DRONI', p.dro.length], ['SCATTO', p.dc > 0 ? 'ricarica' : 'pronto']].forEach(([n, v], i) => { lab(n, R, 174 + i * 12); x.font = '8px monospace'; txt('' + v, R + 46, 174 + i * 12, '#fff'); });
+    x.font = '8px monospace'; x.textAlign = 'center';
+  };
+  // nave di un giocatore: scia dello scatto, fiamme, scudi, droni, mirino in mira precisa (colore diverso per ogni giocatore)
+  const drawShip = (q, i) => {
+    if (!q.alive) return;
+    const key = 'p' + (i % 3), me = q === P[ME];
+    q.dro.forEach(d => dimg(spr.d, d.x, d.y));
+    q.gh.forEach(g => { x.globalAlpha = g.l / 14 * .6; dimg(sw.p, g.x, g.y); });
+    x.globalAlpha = 1;
+    if (!(q.inv > 0 && t % 6 < 3)) {
+      const th = 2 + ((t >> 1) % 3) + (q.vy < -.6 ? 2 : 0) + (q.ds > 0 ? 3 : 0), ln = cl(q.bank, -2, 2) | 0;
+      [4.5, 6.5].forEach(fp => {
+        x.fillStyle = '#f84'; x.beginPath(); x.moveTo(q.x + fp - .9 + ln, q.y + 12.6); x.lineTo(q.x + fp + .9 + ln, q.y + 12.6); x.lineTo(q.x + fp + ln, q.y + 13 + th * 1.2); x.fill();
+        x.fillStyle = '#ffd'; x.beginPath(); x.moveTo(q.x + fp - .4 + ln, q.y + 12.6); x.lineTo(q.x + fp + .4 + ln, q.y + 12.6); x.lineTo(q.x + fp + ln, q.y + 12.8 + th * .7); x.fill();
+      });
+      dimg(spr[key] || spr.p, q.x, q.y);
+    }
+    if (q.sh > 0 && (q.sh > 60 || t % 8 < 4)) { x.strokeStyle = '#3cf'; x.beginPath(); x.arc(q.x + 5.5, q.y + 7, 11, 0, 6.3); x.stroke(); }
+    if (q.od > 0 && (q.od > 60 || t % 8 < 4)) { x.strokeStyle = '#f8c'; x.beginPath(); x.arc(q.x + 5.5, q.y + 7, 13 + Math.sin(t / 4), 0, 6.3); x.stroke(); }
+    if (q.ab > 0 && (q.ab > 60 || t % 8 < 4)) { x.globalAlpha = .5; x.strokeStyle = '#6f8'; x.beginPath(); x.arc(q.x + 5.5, q.y + 7, 17, 0, 6.3); x.stroke(); x.globalAlpha = 1; }
+    if (q.fc && me) { x.fillStyle = '#fff'; x.beginPath(); x.arc(q.x + 5.5, q.y + 7.5, 1.5, 0, 6.3); x.fill(); x.fillStyle = '#f44'; x.beginPath(); x.arc(q.x + 5.5, q.y + 7.5, .6, 0, 6.3); x.fill(); }
+    if (P.length > 1 && !me) { x.font = '5px monospace'; txt(q.name, q.x + 5.5, q.y - 2, '#9cf'); x.font = '8px monospace'; }
+  };
+  const draw = () => {
+    x.setTransform(S, 0, 0, S, 0, 0);
+    if (P[ME]) p = P[ME]; // l'HUD mostra il giocatore locale
+    x.fillStyle = '#000'; x.fillRect(0, 0, VW, H);
+    x.font = '8px monospace'; x.textAlign = 'center'; x.lineWidth = .6;
+    // sfondo: nebulose, pianeta con atmosfera, stelle su 3 livelli di parallasse
+    x.globalCompositeOperation = 'lighter'; x.globalAlpha = .8;
+    neb.forEach(n => dimg(nebI[n.i], n.x * VW - 20 * n.s, n.y - 20 * n.s, 40 * n.s, 40 * n.s));
+    x.globalCompositeOperation = 'source-over'; x.globalAlpha = .65;
+    dimg(planets[pl.i], pl.x * VW - pl.r * 1.08, pl.y - pl.r * 1.08, pl.r * 2.16, pl.r * 2.16);
+    x.globalAlpha = 1;
+    stars.forEach(s => { x.fillStyle = SC[s[3]]; const z = s[3] === 2 ? .67 : s[3] === 1 ? .5 : .34; x.fillRect(s[0], s[1], z, z); });
+    x.save(); x.translate(OX, 0);                       // campo di gioco centrato e ritagliato
+    x.beginPath(); x.rect(0, 0, W, H); x.clip();
+    if (shake > 0) x.translate((Math.random() - .5) * shake / 3, (Math.random() - .5) * shake / 3);
+
+    if (st === 0 || st >= 4) {
+      x.restore(); x.save(); x.translate(OX, 0);
+      drawMenu();
+      x.restore();
+      return;
+    }
+    es.forEach(e => {
+      const bss = e.k === 'B', key = bss ? 'B' + e.bt : e.k === 'a' ? (e.big ? 'A' : 'a') : e.k + ((e.k === 'e' || e.k === 'k') && (t >> 4 & 1) ? '_' : '');
+      let ex = e.x;
+      if (e.tel > 0) { ex += t % 2 ? .5 : -.5; if (t % 6 < 3) x.globalAlpha = .4; txt('!', e.x + e.w / 2, e.y - 2, '#f44'); }
+      const flash = e.f > 0; if (flash) e.f--;
+      if (e.k === 'm' && e.fz < 50 && t % 6 < 3) x.globalAlpha = .4;
+      dimg((flash ? sw : spr)[key], ex, e.y);
+      x.globalAlpha = 1;
+      if (e.af) { x.strokeStyle = e.af === 1 ? 'rgba(255,70,70,.75)' : 'rgba(80,220,255,.75)'; x.beginPath(); x.arc(e.x + e.w / 2, e.y + e.h / 2, Math.max(e.w, e.h) / 2 + 1.5 + Math.sin(t / 5), 0, 6.3); x.stroke(); } // elite
+      if (!bss && e.mh > 3 && e.hp < e.mh && e.hp > 0) { x.fillStyle = '#300'; x.fillRect(e.x, e.y - 3, e.w, 1); x.fillStyle = '#f55'; x.fillRect(e.x, e.y - 3, e.w * e.hp / e.mh, 1); }
+      if (e.ch > 0) { x.strokeStyle = 'rgba(255,90,90,.6)'; x.beginPath(); x.moveTo(e.x + e.w / 2, e.y + e.h); x.lineTo(p.x + 5, p.y + 7); x.stroke(); }
+      if (bss) {
+        if (e.iv > 0 || e.pc > 0) { x.strokeStyle = 'rgba(120,220,255,' + (.35 + .25 * Math.sin(t / 3)) + ')'; x.beginPath(); x.ellipse(e.x + e.w / 2, e.y + e.h / 2, e.w / 2 + 3, e.h / 2 + 3, 0, 0, 6.3); x.stroke(); }
+        if (e.bt === 4 && e.rs === 1) { x.fillStyle = 'rgba(255,60,60,' + (.12 + .1 * Math.sin(t / 2)) + ')'; x.fillRect(e.lx, e.y + e.h, e.w, H - e.y - e.h); }
+        if (e.bt === 2 && e.bs > 0) e.bm.forEach(b => {
+          if (e.bs === 1) { x.fillStyle = t % 4 < 2 ? '#f44' : '#fff'; for (let yy = 14; yy < H; yy += 6) x.fillRect(b.x - .25, yy, .5, 3); if (b.v) txt(b.v > 0 ? '>>' : '<<', b.x, 24, '#f44'); }
+          else {
+            x.fillStyle = 'rgba(255,60,60,.25)'; x.fillRect(b.x - b.w / 2 - 3, 14, b.w + 6, H - 14);
+            x.fillStyle = '#f44'; x.fillRect(b.x - b.w / 2, 14, b.w, H - 14); x.fillStyle = '#fff'; x.fillRect(b.x - 1, 14, 2, H - 14);
+          }
+        });
+      }
+    });
+    bs.forEach(b => {
+      if (b.pr) { x.fillStyle = '#8cf'; x.fillRect(b.x + 1, b.y, 1.4, 8); x.fillStyle = '#fff'; x.fillRect(b.x + 1.4, b.y + 1, .6, 6); }
+      else dimg(spr.b, b.x, b.y);
+    });
+    x.globalCompositeOperation = 'lighter';
+    eb.forEach(b => dimg(spr[b.t ? 'v' : 'c'], b.x, b.y));
+    x.globalCompositeOperation = 'source-over';
+    us.forEach(u => {
+      x.globalAlpha = .3 + .2 * Math.sin(t / 6); x.strokeStyle = UC[u.k]; x.strokeRect(u.x - 1, u.y - 1, 11, 11); x.globalAlpha = 1;
+      dimg(puS[u.k], u.x, u.y);
+    });
+    if (st === 1 || st === 3) P.forEach((q, i) => drawShip(q, i));
+    x.globalCompositeOperation = 'lighter';
+    ps.forEach(q => { x.globalAlpha = Math.min(1, q.l / 10); x.fillStyle = q.c; const z = (q.s || 1) * .7; x.fillRect(q.x - z / 2, q.y - z / 2, z, z); });
+    rg.forEach(r => { x.globalAlpha = r.l / r.m; x.strokeStyle = r.c; x.beginPath(); x.arc(r.x, r.y, r.r, 0, 6.3); x.stroke(); });
+    x.globalCompositeOperation = 'source-over'; x.globalAlpha = 1;
+    fx.forEach(f => { x.globalAlpha = Math.min(1, f.l / 15); txt(f.s, f.x, f.y, f.c); });
+    x.globalAlpha = 1;
+    x.restore();
+    x.save(); x.translate(OX, 0);
+    if (p && p.sl > 0) { x.fillStyle = 'rgba(80,120,255,.1)'; x.fillRect(-OX, 0, VW, H); }
+    if (fl > 0) { x.fillStyle = 'rgba(255,255,255,' + fl / 20 + ')'; x.fillRect(-OX, 0, VW, H); }
+
+    // HUD
+    x.textAlign = 'left'; txt('PT ' + sc, 4, 10);
+    if (P.length > 1) { x.font = '6px monospace'; P.forEach((q, i) => txt(q.name + (q === p ? '*' : '') + ' x' + q.lv, 4, 24 + i * 7, q.alive ? ['#8ef', '#fb7', '#9e9'][i % 3] : '#666')); x.font = '8px monospace'; }
+    x.textAlign = 'right'; txt('HI ' + hi, W - 4, 10, '#fd3');
+    x.textAlign = 'center';
+    if (mult() > 1) { txt('x' + mult(), W / 2, 10, '#fd3'); x.fillRect(W / 2 - 10, 13, 20 * Math.min(1, p.ct / (100 + p.cb * 50)), 1); }
+    if (p && p.gr > 0) { x.fillStyle = '#3cf'; x.fillRect(4, 13, 30 * p.gr / 40, 1); }
+    for (let i = 0; p && i < p.lv; i++) dimg(spr.p, 4 + i * 9, H - 14, 7, 8);
+    if (p) {
+      const dm = Math.max(20, 55 - p.dr * 12);
+      x.fillStyle = p.dc > 0 ? '#456' : '#8ef'; x.fillRect(4, H - 4, p.dc > 0 ? 40 * (1 - p.dc / dm) : 40, 2);
+      txt('B' + p.bm, 78, H - 5, '#f84');
+      txt('W' + p.w, 98, H - 5, '#fd3');
+      [[p.sh, TM.sh, 1], [p.rf, TM.rf, 2], [p.hm, TM.hm, 4], [p.dt, TM.dt, 5], [p.ls, TM.ls, 6], [p.sl, TM.sl, 7], [p.od, TM.od, 8], [p.ab, TM.ab, 9]].forEach(([v, m, c], i) => {
+        if (v > 0) { const h = Math.ceil(12 * Math.min(1, v / (m * (1 + p.du * .4)))); x.fillStyle = UC[c]; x.fillRect(106 + i * 6, H - 3 - h, 4, h); }
+      });
+    }
+    const B = es.find(e => e.k === 'B');
+    if (B) {
+      x.fillStyle = '#222'; x.fillRect(30, 16, 100, 3);
+      x.fillStyle = B.ph === 2 ? '#f44' : B.ph === 1 ? '#f84' : '#c6f'; x.fillRect(30, 16, 100 * Math.max(0, B.hp) / B.m, 3);
+      x.fillStyle = '#fff'; x.fillRect(63, 16, 1, 3); x.fillRect(96, 16, 1, 3);
+    }
+    if (bn > 0 && st === 1) { txt(wave % 5 === 0 ? 'BOSS!' : 'ONDATA ' + wave, W / 2, 110); if (msg) txt(msg, W / 2, 122, '#f84'); }
+    if (st === 3) {
+      x.fillStyle = 'rgba(0,0,0,.8)'; x.fillRect(-OX, 0, VW, H);
+      txt('ONDATA ' + wave + ' SUPERATA!', W / 2, 30, '#4e6');
+      txt('Scegli un potenziamento (1-5)', W / 2, 44);
+      p.ch.forEach((ui, i) => {
+        const u = UP[ui];
+        x.strokeStyle = p.pk === i ? '#4e6' : '#3cf'; x.strokeRect(14, 56 + i * 34, 132, 28);
+        txt((i + 1) + ' ' + u[0], W / 2, 67 + i * 34, p.pk === i ? '#4e6' : '#fd3');
+        txt(u[1], W / 2, 79 + i * 34, '#aaa');
+      });
+      if (p.pk >= 0 && P.length > 1) txt('In attesa degli altri... ' + Math.max(0, Math.ceil(pickT / 60)) + 's', W / 2, 232, '#9cf');
+    }
+    if (st === 2) {
+      txt('GAME OVER', W / 2, 90, '#f44');
+      txt('Punti: ' + sc + '  Ondata: ' + wave, W / 2, 108);
+      txt('Nemici: ' + ks + '  Combo: ' + mc, W / 2, 120, '#aaa');
+      txt('Minaccia max: ' + (mx | 0), W / 2, 132, '#f84');
+      if (nr) txt('NUOVO RECORD!', W / 2, 146, '#fd3');
+      if (!ov) txt(!net || net.role === 'host' ? 'Spazio / tocca per riprovare' : 'In attesa dell\'host...', W / 2, 164);
+      btn('MENU [Esc]', 210, '#f66');
+    }
+    if (pz) { x.fillStyle = 'rgba(0,0,0,.6)'; x.fillRect(-OX, 0, VW, H); txt('PAUSA', W / 2, 120); }
+    if (mute) { x.textAlign = 'right'; txt('MUTO', W - 4, 20, '#888'); x.textAlign = 'center'; }
+    x.restore();
+    side();
+  };
+
+  // ---------- Multigiocatore cooperativo (max 3): host autorevole + client con predizione, WebRTC peer-to-peer senza server ----------
+  // L'host (chi crea la partita) esegue tutta la simulazione; gli altri inviano solo i propri comandi e ricevono istantanee compatte (20/s).
+  // Il proprio movimento e' predetto in locale e riconciliato con l'host (replay dei comandi non ancora confermati).
+  const VER = 9, NET_APP = 'space-mini-v9', MAXP = 3, PF = ['sh', 'rf', 'hm', 'dt', 'ls', 'sl', 'od', 'ab', 'bm', 'w', 'dm', 'fr', 'up', 'du', 'cmb', 'ct', 'cb', 'gr', 'dr', 'dw', 'mg', 'lk', 'as', 'mp', 'wm', 'iv', 'fd', 'dn', 'lv', 'ml', 'alive', 'pk', 'dc', 'dg', 'ds', 'fc'];
+  let lobby = null, idN = 0, net0 = 0;
+  const ICE = globalThis.SG_ICE || null; // opzionale: server TURN a pagamento/gratuito con account, es. [{ urls: 'turn:...', username: '...', credential: '...' }]
+  const mkTransport = rid => {
+    if (globalThis.SG_TRANSPORT) return globalThis.SG_TRANSPORT(rid);
+    if (typeof Trystero === 'undefined') return null;
+    const cfg = { appId: NET_APP }; if (ICE) cfg.turnConfig = ICE; if (globalThis.SG_RELAYS) cfg.relayConfig = { urls: globalThis.SG_RELAYS }; // opzionali: TURN e tracker personalizzati
+    let room; try { room = Trystero.joinRoom(cfg, rid); } catch (e) { return null; } // browser senza WebRTC o libreria in errore
+    const acts = {};
+    const act = ns => acts[ns] || (acts[ns] = room.makeAction(ns));
+    ['hi', 'wl', 'in', 'sn', 'pk', 'gm'].forEach(act); // le azioni vanno create subito da entrambe le parti
+    return {
+      id: Trystero.selfId,
+      on: (ns, fn) => { act(ns).onMessage = (d, c) => fn(d, c.peerId); },
+      send: (ns, d, to) => { try { const r = act(ns).send(d, to ? { target: to } : undefined); if (r && r.catch) r.catch(() => {}); } catch (e) {} },
+      onJoin: fn => { room.onPeerJoin = fn; }, onLeave: fn => { room.onPeerLeave = fn; },
+      peers: () => Object.keys(room.getPeers()),
+      ping: id => room.ping(id),
+      info: async id => { // tipo di connessione scelto: host/srflx = diretta, relay = passa da un server TURN
+        try {
+          const st = await room.getPeers()[id].getStats(); let r = '';
+          st.forEach(x => { if (x.type === 'candidate-pair' && x.nominated && x.state === 'succeeded') { const a = st.get(x.localCandidateId), b = st.get(x.remoteCandidateId); r = (a && a.candidateType === 'relay') || (b && b.candidateType === 'relay') ? 'relay' : 'diretta'; } });
+          return r;
+        } catch (e) { return ''; }
+      },
+      leave: () => room.leave(),
+    };
+  };
+  const myName = tr => 'P-' + String(tr && tr.id || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 3).toUpperCase();
+  const encBits = b => b.l | b.r << 1 | b.u << 2 | b.d << 3 | b.fire << 4 | b.fc << 5 | b.dash << 6 | b.bomb << 7;
+  const decBits = f => ({ l: f[1] & 1, r: f[1] >> 1 & 1, u: f[1] >> 2 & 1, d: f[1] >> 3 & 1, fire: f[1] >> 4 & 1, fc: f[1] >> 5 & 1, dash: f[1] >> 6 & 1, bomb: f[1] >> 7 & 1, mx: f[2] || 0, my: f[3] || 0 });
+
+  // --- lobby pubblica: tutti gli host annunciano la loro partita in una stanza comune ---
+  const lobbyOpen = () => {
+    if (lobby) return lobby;
+    const tr = mkTransport('lobby'); if (!tr) return null;
+    lobby = { tr, games: {} };
+    tr.on('gm', (d, pid) => { lobby.games[pid] = Object.assign({}, d, { pid, seen: t }); });
+    tr.onLeave(pid => { delete lobby.games[pid]; });
+    tr.onJoin(pid => { announce(pid); });
+    return lobby;
+  };
+  const lobbyClose = () => { if (lobby) { try { lobby.tr.leave(); } catch (e) {} lobby = null; } };
+  const announce = to => { if (lobby && net && net.role === 'host' && net.pub) lobby.tr.send('gm', { r: net.code, n: P.length, mx: MAXP, w: wave, s: st, nm: P[0].name, v: VER }, to); };
+  const lobbyList = () => lobby ? Object.values(lobby.games).filter(g => t - g.seen < 700 && g.v === VER).sort((a, b) => (a.n >= a.mx) - (b.n >= b.mx) || b.n - a.n).slice(0, 5) : [];
+  const leaveNet = m => {
+    if (net) { try { net.tr.leave(); } catch (e) {} }
+    lobbyClose(); net = null; P = []; ME = 0; p = undefined; st = 0; note = m || ''; resetWorld(); evq.length = 0;
+  };
+
+  // --- host ---
+  const hostGame = pub => {
+    const code = Math.random().toString(36).replace(/[^a-z0-9]/g, '').slice(2, 6).toUpperCase().padEnd(4, 'X');
+    const gt = mkTransport('g-' + code);
+    if (!gt) { note = 'Rete non disponibile'; return; }
+    net = { role: 'host', tr: gt, code, pub, seq: 0, peers: {} };
+    P = [newP(0, { local: 1, name: myName(gt) })]; ME = 0; p = P[0]; resetWorld(); st = 5; net0 = t; note = '';
+    gt.on('hi', (d, pid) => onHello(d, pid));
+    gt.on('in', (d, pid) => {
+      const q = net && net.peers[pid]; if (!q || !d || !d.f) return;
+      for (const f of d.f) if (f[0] > (q.lastS || 0)) { q.lastS = f[0]; q.q.push({ s: f[0], b: decBits(f) }); }
+    });
+    gt.on('pk', (d, pid) => { const q = net && net.peers[pid]; if (q && st === 3 && q.ch[d] !== undefined) q.pk = d; });
+    gt.onLeave(pid => {
+      const q = net && net.peers[pid]; if (!q) return;
+      delete net.peers[pid]; P = P.filter(x => x !== q); pop(W / 2, 60, q.name + ' E\' USCITO', '#f84'); announce();
+      if (P.length > 0 && st === 1 && !P.some(x => x.alive)) { st = 2; ov = 60; }
+    });
+    if (pub) { lobbyOpen(); announce(); }
+  };
+  const onHello = (d, pid) => {
+    if (!net || net.role !== 'host' || !d) return;
+    if (net.peers[pid]) { net.tr.send('wl', { pid: net.peers[pid].pid }, pid); return; }
+    if (d.v !== VER) { net.tr.send('wl', { bad: 1 }, pid); return; }
+    if (P.length >= MAXP) { net.tr.send('wl', { full: 1 }, pid); return; }
+    const q = newP(P.length, { peer: pid, name: String(d.nm || '').slice(0, 5) || 'P' + (P.length + 1) });
+    if (st !== 5 && st !== 0) { q.alive = 0; q.lv = 0; } // partita in corso: entra alla prossima ondata
+    P.push(q); net.peers[pid] = q;
+    net.tr.send('wl', { pid: q.pid }, pid); announce();
+  };
+  const q4 = v => Math.round(v * 4), q50 = v => Math.round(v * 50);
+  const encE = e => {
+    e.id = e.id || ++idN;
+    const a = [e.id, e.k, q4(e.x), q4(e.y), e.hp | 0, e.mh | 0, e.f > 0 ? 1 : 0, e.af || 0, e.tel > 0 ? 1 : 0];
+    if (e.k === 'a') a.push(e.big ? 1 : 0); else if (e.k === 'm') a.push(e.fz | 0); else if (e.k === 's') a.push(e.ch > 0 ? 1 : 0);
+    else if (e.k === 'B') a.push([e.bt, e.ph, e.iv > 0 ? 1 : 0, e.pc, e.bs, e.rs, q4(e.lx || 0), e.m, (e.bm || []).map(b => [q4(b.x), b.w, q50(b.v)])]);
+    return a;
+  };
+  const decE = a => {
+    const k = a[1], d = ET[k], o = { id: a[0], k, x: a[2] / 4, y: a[3] / 4, hp: a[4], mh: a[5], f: a[6] ? 4 : 0, af: a[7], tel: a[8] };
+    if (k === 'B') { const z = a[9], g = SZ['B' + z[0]]; Object.assign(o, { bt: z[0], ph: z[1], iv: z[2], pc: z[3], bs: z[4], rs: z[5], lx: z[6] / 4, m: z[7], bm: z[8].map(b => ({ x: b[0] / 4, w: b[1], v: b[2] / 50 })), w: g[0], h: g[1] }); }
+    else if (k === 'a') { o.big = a[9]; o.w = a[9] ? 18 : 9; o.h = a[9] ? 16 : 8; }
+    else { o.w = d[0]; o.h = d[1]; if (k === 'm') o.fz = a[9]; if (k === 's') o.ch = a[9]; }
+    return o;
+  };
+  const encP = q => [q.pid, q.name, q4(q.x), q4(q.y), q50(q.vx), q50(q.vy), q50(q.dvx), q50(q.dvy), q50(q.sp), q.ack, q.inv > 0 ? 1 : 0, q.ch, q.dro.map(d => [q4(d.x), q4(d.y)])].concat(PF.map(k => q[k]));
+  const sendSnap = () => {
+    if (!Object.keys(net.peers).length) { evq.length = 0; return; }
+    const snap = { n: ++net.seq, t, st, w: wave, bn, msg, sc, ks, mc, mx: mx | 0, sk: shake, fl, pt: pickT > 9e8 ? 0 : pickT | 0, nr, ov,
+      p: P.map(encP), e: es.map(encE), b: eb.map(b => { b.id = b.id || ++idN; return [b.id, q4(b.x), q4(b.y), q50(b.vx), q50(b.vy), b.t ? 1 : 0]; }),
+      B: bs.map(b => [q4(b.x), q4(b.y), q50(b.vx), q50(b.vy), b.pr ? 1 : 0, b.h ? 1 : 0]), u: us.map(u => [q4(u.x), q4(u.y), u.k]), ev: evq.splice(0) };
+    net.tr.send('sn', snap);
+    net.bytes = (net.bytes || 0) + JSON.stringify(snap).length;
+  };
+  const hostTick = () => {
+    upd();
+    if (t % 120 === 7) Object.keys(net.peers).forEach(pid => { const q = net.peers[pid]; net.tr.ping(pid).then(ms => { q.lead = cl(Math.round(ms / 33), 0, 6); }).catch(() => {}); });
+    if (net.pub && t % 150 === 0) announce();
+    if (t % 3 === 0) sendSnap();
+  };
+
+  // --- client ---
+  const joinGame = code => {
+    const gt = mkTransport('g-' + code);
+    if (!gt) { note = 'Rete non disponibile'; return; }
+    net = { role: 'client', tr: gt, code, host: null, snaps: [], seq: 0, hist: [], out: [], t0: t, ping: 0, lead: 0, conn: '', age: 0, lastN: 0, em: null };
+    P = []; ME = 0; p = undefined; st = 6; note = '';
+    gt.onJoin(pid => { if (net && !net.host) gt.send('hi', { v: VER, nm: myName(gt) }, pid); });
+    gt.on('wl', (d, pid) => {
+      if (!net || net.host || !d) return;
+      if (d.full) leaveNet('Partita piena'); else if (d.bad) leaveNet('Versione diversa del gioco');
+      else {
+        net.host = pid; net.myPid = d.pid;
+        gt.ping(pid).then(ms => { if (net) { net.ping = ms; net.lead = cl(Math.round(ms / 33), 0, 6); } }).catch(() => {});
+        if (gt.info) gt.info(pid).then(c => { if (net) net.conn = c || net.conn; }).catch(() => {});
+      }
+    });
+    gt.on('sn', (d, pid) => { if (net && pid === net.host) net.snaps.push(d); });
+    gt.onLeave(pid => { if (net && pid === net.host) leaveNet('Host disconnesso'); });
+  };
+  const applySnap = s => {
+    const n = net, dt = Math.max(1, s.t - (n.lastT || s.t - 3)), lead = n.lead; n.lastT = s.t; n.age = 0;
+    const lv0 = P[ME] ? P[ME].lv : -1;
+    wave = s.w; bn = s.bn; msg = s.msg; sc = s.sc; ks = s.ks; mc = s.mc; mx = s.mx; pickT = s.pt; ov = s.ov; nr = s.nr; shake = Math.max(shake, s.sk); fl = Math.max(fl, s.fl);
+    const nst = s.st === 5 ? 6 : s.st;
+    if (nst === 2 && st !== 2 && sc > hi) { hi = sc; try { localStorage.hi = hi; } catch (e) {} }
+    if (nst === 1 && st === 6) { ps = []; fx = []; rg = []; n.hist = []; }
+    st = nst;
+    // giocatori (il proprio viene riconciliato con l'host: stato confermato + replay dei comandi non ancora confermati)
+    const old = new Map(P.map(q => [q.pid, q]));
+    P = s.p.map(a => {
+      const q = old.get(a[0]) || Object.assign(freshP(), { pid: a[0], q: [] }), me = a[0] === n.myPid;
+      q.name = a[1]; q.ack = a[9]; q.inv = a[10] ? 5 : 0; q.ch = a[11]; q.sp = a[8] / 50;
+      q.dro = a[12].map(d => ({ x: d[0] / 4, y: d[1] / 4 }));
+      PF.forEach((k, i) => { q[k] = a[13 + i]; });
+      const px0 = q.x, py0 = q.y, had = q._pred;
+      q.x = a[2] / 4; q.y = a[3] / 4; q.vx = a[4] / 50; q.vy = a[5] / 50; q.dvx = a[6] / 50; q.dvy = a[7] / 50; q.px = q.x;
+      if (me) {
+        q.local = 1; n.hist = n.hist.filter(f => f.s > q.ack);
+        if (st === 1 && q.alive) n.hist.forEach(f => stepMove(q, f.b));
+        q.dst = 0;
+        if (had) { const ex = q.x - px0, ey = q.y - py0; if (Math.hypot(ex, ey) < 24) { q.x = px0 + ex * .35; q.y = py0 + ey * .35; } }
+        q._pred = 1;
+      } else { q.bank = q.vx; }
+      return q;
+    });
+    ME = Math.max(0, P.findIndex(q => q.pid === n.myPid)); p = P[ME];
+    if (p && lv0 > p.lv && lv0 >= 0) try { globalThis.navigator && navigator.vibrate && navigator.vibrate(40); } catch (e) {}
+    // entita': posizione dall'istantanea + velocita' stimata fra due istantanee consecutive, spinta in avanti di mezzo RTT
+    const em = new Map();
+    es = s.e.map(a => {
+      const o = decE(a), pv = n.em && n.em.get(o.id);
+      o.vx = pv ? (pv.vx * .4 + (o.x - pv.x) / dt * .6) : 0; o.vy = pv ? (pv.vy * .4 + (o.y - pv.y) / dt * .6) : 0;
+      em.set(o.id, { x: o.x, y: o.y, vx: o.vx, vy: o.vy });
+      o.x += o.vx * lead; o.y += o.vy * lead; return o;
+    });
+    n.em = em;
+    eb = s.b.map(a => ({ id: a[0], x: a[1] / 4 + a[3] / 50 * lead, y: a[2] / 4 + a[4] / 50 * lead, vx: a[3] / 50, vy: a[4] / 50, t: a[5] }));
+    bs = s.B.map(a => ({ x: a[0] / 4 + a[2] / 50 * lead, y: a[1] / 4 + a[3] / 50 * lead, vx: a[2] / 50, vy: a[3] / 50, pr: a[4], h: a[5] }));
+    us = s.u.map(a => ({ x: a[0] / 4, y: a[1] / 4 + lead, k: a[2] }));
+  };
+  const extrap = () => { // fra un'istantanea e l'altra: moto stimato (i proiettili vanno dritti, i nemici seguono la velocita' recente)
+    const n = net; if (!n.host || n.age++ > 8) return;
+    es.forEach(e => { e.x += e.vx; e.y += e.vy; });
+    eb.forEach(b => { b.x += b.vx; b.y += b.vy; });
+    bs.forEach(b => { b.x += b.vx; b.y += b.vy; });
+    us.forEach(u => { u.y += 1; });
+    P.forEach((q, i) => {
+      if (i === ME || !q.alive) return;
+      if (q.ds > 0) { q.ds--; q.x += q.dvx; q.y += q.dvy; q.gh.push({ x: q.x, y: q.y, l: 14 }); } else { q.x += q.vx; q.y += q.vy; }
+      q.x = cl(q.x, 0, W - 11); q.y = cl(q.y, 96, 212); q.bank = q.vx;
+    });
+  };
+  const clientTick = () => {
+    const n = net;
+    fxStep();
+    if (!n.host) {
+      if (t % 60 === 30) n.tr.peers().forEach(pid => n.tr.send('hi', { v: VER, nm: myName(n.tr) }, pid));
+      if (t - n.t0 > 900) leaveNet('Nessuna risposta dall\'host (rete bloccata?)');
+      n.snaps.length = 0; return;
+    }
+    extrap();
+    if (n.snaps.length) {
+      const L = n.snaps.splice(0);
+      L.forEach(s => s.ev.forEach(a => { // eventi cosmetici (esplosioni, anelli, scritte, suoni) di tutte le istantanee ricevute
+        if (a[0] === 'b') boom(a[1], a[2], a[3], a[4]); else if (a[0] === 'r') ring(a[1], a[2], a[3], a[4]); else if (a[0] === 'p') pop(a[1], a[2], a[3], a[4]); else if (a[0] === 's') snd(a[1], a[2], a[3], a[4]);
+      }));
+      if (L[L.length - 1].n > n.lastN) { n.lastN = L[L.length - 1].n; applySnap(L[L.length - 1]); }
+    }
+    const q = P[ME];
+    if (q) { // predizione del proprio movimento + invio dei comandi (2 pacchetti per volta, 30 al secondo)
+      const b = readLocalInput(), f = { s: ++n.seq, b };
+      if (st === 1 && q.alive) {
+        stepMove(q, b);
+        if (q.dst) { q.dst = 0; snd(500, .12, 'sawtooth', 400); }
+        if (q.ds > 0) q.gh.push({ x: q.x, y: q.y, l: 14 });
+        if (b.fire && n.seq % 9 === 0) snd(700, .04);
+      }
+      n.hist.push(f); if (n.hist.length > 120) n.hist.shift();
+      n.out.push([f.s, encBits(b), r1(b.mx), r1(b.my)]);
+      if (n.seq % 2 === 0) { n.tr.send('in', { f: n.out }, n.host); n.out = []; }
+    }
+    if (t % 120 === 0) {
+      n.tr.ping(n.host).then(ms => { n.ping = ms; n.lead = cl(Math.round(ms / 33), 0, 6); }).catch(() => {});
+      if (n.tr.info) n.tr.info(n.host).then(c => { n.conn = c || n.conn; }).catch(() => {});
+    }
+  };
+  const tick = () => { if (net && net.role === 'client') clientTick(); else if (net) hostTick(); else upd(); };
+
+  // --- menu e interfaccia del multigiocatore ---
+  const browse = () => { if (!lobbyOpen()) { note = 'Rete non disponibile'; return; } st = 4; note = ''; net0 = t; };
+  const joinFrom = i => { const g = lobbyList()[i]; if (g && g.n < g.mx) { lobbyClose(); joinGame(g.r); } };
+  const askCode = () => { let c = ''; try { c = prompt('Codice stanza:') || ''; } catch (err) {} c = c.trim().toUpperCase(); if (c) { lobbyClose(); joinGame(c); } };
+  const inBox = (gx, gy, y, h = 14) => gx >= 20 && gx <= 140 && gy >= y && gy <= y + h;
+  const back = () => { if (net || st >= 4) leaveNet(); else st = 0; };
+  const uiTap = (gx, gy) => {
+    if (st === 0) {
+      if (inBox(gx, gy, 112)) { hostGame(true); return true; }
+      if (inBox(gx, gy, 130)) { browse(); return true; }
+      if (gy >= 148 && gy <= 162 && gx >= 8 && gx <= 152) { if (gx < W / 2) hostGame(false); else askCode(); return true; }
+      return false;
+    }
+    if (st === 4) {
+      if (inBox(gx, gy, 194)) { askCode(); return true; }
+      if (inBox(gx, gy, 214)) { back(); return true; }
+      const i = Math.floor((gy - 52) / 28); if (gy >= 52 && i >= 0 && i < 5) joinFrom(i);
+      return true;
+    }
+    if (st === 5) { if (inBox(gx, gy, 190)) { start(); return true; } if (inBox(gx, gy, 210)) { back(); return true; } return true; }
+    if (st === 6) { if (inBox(gx, gy, 210)) back(); return true; }
+    if (st === 2) { if (inBox(gx, gy, 210)) { back(); return true; } return !!(net && net.role === 'client'); }
+    return false;
+  };
+  const btn = (label, y, col) => { x.strokeStyle = col; x.strokeRect(20, y, 120, 14); txt(label, W / 2, y + 10, col); };
+  const slots = y0 => { for (let i = 0; i < MAXP; i++) { const q = P[i]; x.strokeStyle = q ? ['#8ef', '#fb7', '#9e9'][i] : '#444'; x.strokeRect(14, y0 + i * 28, 132, 22); txt(q ? (i + 1) + '  ' + q.name + (q === P[ME] ? ' (tu)' : i ? '' : ' (host)') : (i + 1) + '  in attesa...', W / 2, y0 + 14 + i * 28, q ? '#fff' : '#666'); } };
+  const drawMenu = () => {
+    if (st === 0) {
+      ['e', 'k', 's', 'x', 'z'].forEach((k, i) => dimg(spr[k], 20 + i * 28, 14 + Math.sin(t / 20 + i) * 3));
+      dimg(spr.p, 74, 38 + Math.sin(t / 25) * 2);
+      x.font = '14px monospace'; txt('SPACE MINI', W / 2, 78, '#3cf'); x.font = '8px monospace';
+      btn('SOLO  [Spazio]', 94, '#3cf'); btn('CREA PARTITA  [H]', 112, '#4e6'); btn('UNISCITI  [J]', 130, '#fd3');
+      txt('K = privata   C = entra con codice', W / 2, 156, '#789');
+      if (note) txt(note, W / 2, 167, '#f84');
+      txt('Frecce/WASD muovi  B bomba', W / 2, 182, '#aaa');
+      txt('X scatto  Maiusc mira precisa', W / 2, 192, '#aaa');
+      txt('P pausa  M muto  F schermo int.', W / 2, 202, '#aaa');
+      txt('1-5 scelta potenziamenti', W / 2, 212, '#aaa');
+      txt('Touch: 2o dito SX scatto, DX bomba', W / 2, 222, '#aaa');
+      txt('Record: ' + hi, W / 2, 234, '#fd3');
+    } else if (st === 4) {
+      txt('CERCA PARTITA', W / 2, 20, '#3cf');
+      const np = lobby ? lobby.tr.peers().length : 0;
+      txt(np ? 'Giocatori in lobby: ' + np : 'Connessione alla lobby... ' + ((t - net0) / 60 | 0) + 's', W / 2, 33, '#9cf');
+      const L = lobbyList();
+      L.forEach((g, i) => {
+        x.strokeStyle = g.n >= g.mx ? '#555' : '#4e6'; x.strokeRect(14, 52 + i * 28, 132, 24);
+        txt((i + 1) + ' ' + g.nm + '  ' + g.n + '/' + g.mx, W / 2, 62 + i * 28, g.n >= g.mx ? '#777' : '#fff'); txt(g.n >= g.mx ? 'piena' : g.s === 5 ? 'in attesa' : 'ondata ' + g.w, W / 2, 72 + i * 28, '#aaa');
+      });
+      if (!L.length) { txt('Nessuna partita aperta.', W / 2, 92, '#aaa'); txt('Creane una dal menu (H).', W / 2, 104, '#aaa'); if (t - net0 > 600) { txt('Lobby vuota o rete bloccata?', W / 2, 124, '#f84'); txt('Prova con CODICE [C].', W / 2, 134, '#f84'); } }
+      btn('CODICE [C]', 194, '#fd3');
+      btn('INDIETRO [Esc]', 214, '#f66');
+    } else if (st === 5) {
+      txt('LA TUA PARTITA', W / 2, 20, '#3cf');
+      txt(net.pub ? 'Pubblica: visibile a tutti' : 'Privata (solo con il codice)', W / 2, 33, '#9cf');
+      x.font = '14px monospace'; txt(net.code, W / 2, 58, '#fd3'); x.font = '8px monospace'; txt('codice stanza', W / 2, 68, '#789');
+      slots(80);
+      btn('INIZIA [Spazio]', 190, '#4e6'); btn('ANNULLA [Esc]', 210, '#f66');
+    } else if (st === 6) {
+      txt('SALA D\'ATTESA', W / 2, 20, '#3cf');
+      txt(net.host ? 'Connesso all\'host' : 'Connessione in corso... ' + ((t - net.t0) / 60 | 0) + 's', W / 2, 33, net.host ? '#4e6' : '#fd3');
+      if (net.host) txt('ping ' + (net.ping | 0) + ' ms  ' + (net.conn || ''), W / 2, 45, '#9cf'); else if (t - net.t0 > 420) txt('Rete bloccata? Prova un altro Wi-Fi.', W / 2, 45, '#f84');
+      slots(80);
+      txt('Attendi che l\'host inizi', W / 2, 180, '#aaa');
+      btn('ESCI [Esc]', 210, '#f66');
+    }
+  };
+
+  // ---------- Input ----------
+  const go = () => { if (st === 0 || st === 5 || (st === 2 && !ov && (!net || net.role === 'host'))) start(); };
+  const pick = i => { const q = P[ME]; if (st === 3 && q && q.ch[i] !== undefined) { q.pk = i; if (net && net.role === 'client') net.tr.send('pk', i, net.host); } };
+  addEventListener('keydown', e => {
+    if (['Space', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
+    keys[e.code] = 1;
+    if (e.repeat) return;
+    if (e.code === 'Space' || e.code === 'Enter') go();
+    if (e.code === 'KeyB') bombReq();
+    if (e.code === 'KeyX' || e.code === 'KeyZ') dash();
+    if (e.code === 'KeyM') mute = !mute;
+    if (!net && (e.code === 'KeyP' || e.code === 'Escape') && st === 1) pz = !pz;
+    if (e.code === 'Escape' && (st === 2 || st >= 4)) back();
+    if (e.code === 'Escape' && net && st === 1) { if (t - escT < 90) back(); else { escT = t; pop(W / 2, 120, 'Esc ancora per uscire', '#f84'); } }
+    if (st === 0) {
+      if (e.code === 'KeyH') hostGame(true);
+      if (e.code === 'KeyK') hostGame(false);
+      if (e.code === 'KeyJ') browse();
+      if (e.code === 'KeyC') askCode();
+    } else if (st === 4 && e.code === 'KeyC') askCode();
+    if (/^(Digit|Numpad)[1-5]$/.test(e.code)) { if (st === 4) joinFrom(+e.code.slice(-1) - 1); else pick(+e.code.slice(-1) - 1); }
+  });
+  addEventListener('keyup', e => keys[e.code] = 0);
+  addEventListener('visibilitychange', () => { if (document.hidden && st === 1 && !net) pz = 1; });
+  addEventListener('blur', () => { Object.keys(keys).forEach(k => keys[k] = 0); if (st === 1 && !net) pz = 1; });
+  // touch/mouse RELATIVO: toccare non teletrasporta la navicella, conta solo il trascinamento
+  C.addEventListener('pointerdown', e => {
+    const rr = C.getBoundingClientRect(), gx = (e.clientX - rr.left) / rr.width * VW - OX, gy = (e.clientY - rr.top) / rr.height * H;
+    if (uiTap(gx, gy)) return;
+    if (st === 3) { pick(Math.floor((gy - 56) / 34)); return; }
+    if (pz) { pz = 0; return; }
+    go();
+    if (pid === null) { pid = e.pointerId; touch = 1; lx = e.clientX; ly = e.clientY; C.setPointerCapture(e.pointerId); }
+    else { const r = C.getBoundingClientRect(); ((e.clientX - r.left) / r.width < .5 ? dash : bombReq)(); }
+  });
+  C.addEventListener('pointermove', e => {
+    if (e.pointerId !== pid) return;
+    if (st === 1 && !pz) {
+      const r = C.getBoundingClientRect();
+      want.mx += (e.clientX - lx) / r.width * VW * 1.3;
+      want.my += (e.clientY - ly) / r.height * H * 1.3;
+    }
+    lx = e.clientX; ly = e.clientY;
+  });
+  const up = e => { if (e.pointerId === pid) { pid = null; touch = 0; } };
+  C.addEventListener('pointerup', up); C.addEventListener('pointercancel', up);
+  C.addEventListener('contextmenu', e => { e.preventDefault(); bombReq(); });
+
+  // ---------- Loop a passo fisso (60 aggiornamenti/s) ----------
+  let last = 0, acc = 0;
+  const loop = n => {
+    acc = Math.min(acc + n - last, 100); last = n;
+    while (acc >= 16.67) { tick(); acc -= 16.67; }
+    draw();
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+};
+document.body ? run() : addEventListener('DOMContentLoaded', run);
+})();
